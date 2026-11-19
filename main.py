@@ -107,11 +107,49 @@ def bridge_state_top() -> bool:
         return False
 
 
+_MUTEX_HANDLE: list = []
+
+
+def _already_running() -> bool:
+    """命名互斥体保证只跑一个实例，避免重复双击录出两份文件。"""
+    try:
+        k32 = ctypes.windll.kernel32
+        h = k32.CreateMutexW(None, False, "meeting-mate-single-instance")
+        if k32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            ctypes.windll.user32.MessageBoxW(
+                None, "meeting-mate 已经在运行了。\n\n看下屏幕右侧的小窗口。",
+                "桌面助理 · 已在运行", 0x40,
+            )
+            return True
+        _MUTEX_HANDLE.append(h)  # 持有引用，进程存活期间不释放
+        return False
+    except Exception:
+        return False
+
+
+def _report_crash(exc: BaseException) -> None:
+    """无控制台启动时，错误只能靠弹窗告诉用户，否则就是"双击没反应"。"""
+    tb = traceback.format_exc()
+    log = ROOT / "data" / "logs" / "crash.log"
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(tb, encoding="utf-8")
+    except Exception:
+        log = None
+
+    head = [ln for ln in tb.strip().splitlines() if ln.strip()][-1:]
+    msg = f"启动失败：{head[0] if head else exc}\n\n完整日志：\n{log or '（写入失败）'}"
+    try:
+        ctypes.windll.user32.MessageBoxW(None, msg, "桌面助理 · 启动失败", 0x10)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     try:
+        if _already_running():
+            sys.exit(0)
         main()
-    except Exception:
-        log = ROOT / "data" / "logs" / "crash.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(traceback.format_exc(), encoding="utf-8")
+    except Exception as exc:
+        _report_crash(exc)
         raise
