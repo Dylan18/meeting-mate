@@ -10,7 +10,7 @@ from pathlib import Path
 from .. import llm, store
 from ..assistant import Assistant
 from ..audio import list_devices
-from ..config import REPORT_DIR, config
+from ..config import LOG_DIR, REPORT_DIR, config
 
 
 def _jsonable(obj):
@@ -30,11 +30,19 @@ class Bridge:
         self.events: list[dict] = []
         self._seq = 0
         self._lock = threading.RLock()
-        self.window = None
-        self.asst = Assistant(self._on_event)
+        self._window = None
+        self._asst = Assistant(self._on_event)
         self.count_today = len(store.load_segments())
         self._closing = False
         threading.Thread(target=self._scheduler, daemon=True, name="scheduler").start()
+
+    def attach_window(self, window) -> None:
+        """显式挂载窗口。
+
+        注意：不能叫 self.window —— pywebview 会反射 js_api 对象的公开属性，
+        撞上 Window/Form 这类 .NET 对象会递归爆栈。
+        """
+        self._window = window
 
     # ------------------------------------------------------------ 事件
     def _on_event(self, kind: str, payload) -> None:
@@ -60,14 +68,14 @@ class Bridge:
         return {"seq": seq, "events": events, "state": self.state()}
 
     def state(self) -> dict:
-        m = self.asst.meeting
+        m = self._asst.meeting
         return {
-            "listening": bool(self.asst.listening),
+            "listening": bool(self._asst.listening),
             "meeting": ({"start": m["start"].isoformat(), "topic": m.get("topic", "")}
                         if m else None),
-            "asr": {"status": self.asst.transcriber.status,
-                    "text": self.asst.transcriber.status_text},
-            "busy": self.asst.busy,
+            "asr": {"status": self._asst.transcriber.status,
+                    "text": self._asst.transcriber.status_text},
+            "busy": self._asst.busy,
             "count": self.count_today,
             "llm_ready": config.llm_ready(),
             "model": config.get("asr_model", "sensevoice"),
@@ -76,21 +84,21 @@ class Bridge:
 
     # ------------------------------------------------------------ 操作
     def toggle_listen(self) -> dict:
-        if self.asst.listening:
-            self.asst.stop_listening()
+        if self._asst.listening:
+            self._asst.stop_listening()
         else:
-            self.asst.start_listening()
+            self._asst.start_listening()
         return self.state()
 
     def toggle_meeting(self) -> dict:
-        if self.asst.meeting:
-            self.asst.end_meeting(auto_summary=True)
+        if self._asst.meeting:
+            self._asst.end_meeting(auto_summary=True)
         else:
-            self.asst.start_meeting()
+            self._asst.start_meeting()
         return self.state()
 
     def make_daily(self, day: str | None = None) -> dict:
-        self.asst.generate_daily(day=day or date.today().strftime("%Y-%m-%d"),
+        self._asst.generate_daily(day=day or date.today().strftime("%Y-%m-%d"),
                                  silent_if_empty=False)
         return {"ok": True}
 
@@ -116,14 +124,14 @@ class Bridge:
         clean = {k: v for k, v in (patch or {}).items() if k in allowed}
         old_model = config.get("asr_model")
         config.update(clean)
-        if self.window is not None:
+        if self._window is not None:
             try:
-                self.window.on_top = bool(config.get("always_on_top", False))
+                self._window.on_top = bool(config.get("always_on_top", False))
             except Exception:
                 pass
-        if self.asst.listening and (clean.get("asr_model") and clean.get("asr_model") != old_model):
-            self.asst.stop_listening()
-            self.asst.start_listening()
+        if self._asst.listening and (clean.get("asr_model") and clean.get("asr_model") != old_model):
+            self._asst.stop_listening()
+            self._asst.start_listening()
         return {"ok": True, "state": self.state()}
 
     def get_recent(self, n: int = 40) -> list[dict]:
@@ -198,42 +206,52 @@ class Bridge:
     def open_reports_dir(self) -> dict:
         return self.open_path(str(REPORT_DIR))
 
+    def js_error(self, msg: str) -> dict:
+        """前端异常落到日志，避免界面出错时完全没有痕迹。"""
+        try:
+            p = LOG_DIR / "frontend.log"
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+        except Exception:
+            pass
+        return {"ok": True}
+
     def show_message(self, text: str) -> None:
         self._push("notice", text)
 
     # ------------------------------------------------------------ 窗口
     def win_pos(self) -> dict:
-        if not self.window:
+        if not self._window:
             return {"x": 0, "y": 0}
         try:
-            return {"x": int(self.window.x), "y": int(self.window.y)}
+            return {"x": int(self._window.x), "y": int(self._window.y)}
         except Exception:
             return {"x": 0, "y": 0}
 
     def win_move(self, x: int, y: int) -> dict:
-        if self.window:
+        if self._window:
             try:
-                self.window.move(int(x), int(y))
+                self._window.move(int(x), int(y))
             except Exception:
                 pass
         return {"ok": True}
 
     def minimize(self) -> None:
-        if self.window:
+        if self._window:
             try:
-                self.window.minimize()
+                self._window.minimize()
             except Exception:
                 pass
 
     def quit(self) -> None:
         self._closing = True
         try:
-            self.asst.shutdown()
+            self._asst.shutdown()
         except Exception:
             pass
-        if self.window:
+        if self._window:
             try:
-                self.window.destroy()
+                self._window.destroy()
             except Exception:
                 pass
 
@@ -242,7 +260,7 @@ class Bridge:
             return
         self._closing = True
         try:
-            self.asst.shutdown()
+            self._asst.shutdown()
         except Exception:
             pass
 
@@ -274,7 +292,7 @@ class Bridge:
         if len(recs) < 3:
             return
         self._push("notice", f"正在补生成 {y} 的日报…")
-        self.asst.generate_daily(day=y)
+        self._asst.generate_daily(day=y)
 
     def _check_daily_time(self) -> None:
         if not config.get("daily_report_enabled", True):
@@ -284,9 +302,9 @@ class Bridge:
         if now.strftime("%H:%M") < target:
             return
         today = now.strftime("%Y-%m-%d")
-        if store.has_daily_report(today) or self.asst.busy:
+        if store.has_daily_report(today) or self._asst.busy:
             return
         if len(store.load_segments(today)) < 3:
             return
         self._push("notice", "到点了，正在生成今日日报…")
-        self.asst.generate_daily(day=today)
+        self._asst.generate_daily(day=today)

@@ -1,6 +1,26 @@
 /* 桌面助理 · 前端逻辑 */
 (function () {
   "use strict";
+  function report(msg) {
+    try {
+      window.__errs = (window.__errs || []).concat([String(msg)]);
+      // 后端日志留痕：界面出错时不能一点痕迹都没有
+      const api = window.pywebview && window.pywebview.api;
+      if (api && api.js_error) api.js_error(String(msg).slice(0, 500));
+    } catch (e) {}
+  }
+  window.addEventListener("error", function (e) {
+    report((e.message || "error") + " @ " + (e.filename || "").split("/").pop() + ":" + (e.lineno || 0));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    var r = e.reason;
+    report("promise: " + ((r && (r.message || r)) || "unknown"));
+  });
+  window.__report = report;
+})();
+
+(function () {
+  "use strict";
 
   const $ = (id) => document.getElementById(id);
   const py = () => (window.pywebview && window.pywebview.api) || null;
@@ -177,9 +197,18 @@
   }
 
   // ---------------------------------------------------------------- 轮询
+  let pollFails = 0;
+  function markBroken(msg) {
+    const fa = $("footAsr");
+    if (fa) { fa.textContent = msg; fa.style.color = "#E5484D"; fa.title = "界面与后台通信失败"; }
+  }
+
   async function pollLoop() {
     const api = py();
-    if (api) {
+    if (!api) {
+      pollFails++;
+      if (pollFails === 12) markBroken("未连接后台");
+    } else {
       try {
         const r = await api.poll(seq);
         if (r) {
@@ -187,7 +216,12 @@
           (r.events || []).forEach(handleEvent);
           applyState(r.state);
         }
-      } catch (e) { /* 引擎重启中 */ }
+        pollFails = 0;
+      } catch (e) {
+        pollFails++;
+        // 连续失败才提示，避免模型加载时的瞬时异常刷屏
+        if (pollFails === 12) markBroken("通信异常");
+      }
     }
     clearTimeout(pollTimer);
     pollTimer = setTimeout(pollLoop, 260);
@@ -195,15 +229,18 @@
 
   // ---------------------------------------------------------------- 动作
   async function toggleListen() {
-    const api = py(); if (!api) return;
+    const api = py();
+    if (!api) { toast("后台还没连上，请稍后重试", "err"); return; }
     try { applyState(await api.toggle_listen()); } catch (e) { toast("操作失败", "err"); }
   }
   async function toggleMeeting() {
-    const api = py(); if (!api) return;
+    const api = py();
+    if (!api) { toast("后台还没连上，请稍后重试", "err"); return; }
     try { applyState(await api.toggle_meeting()); } catch (e) { toast("操作失败", "err"); }
   }
   async function makeDaily() {
-    const api = py(); if (!api) return;
+    const api = py();
+    if (!api) { toast("后台还没连上，请稍后重试", "err"); return; }
     toast("正在整理今天的记录…");
     try { await api.make_daily(null); } catch (e) { toast("生成失败", "err"); }
   }
@@ -474,7 +511,12 @@
   async function boot() {
     if (booted) return;
     booted = true;
-    bind();
+    try {
+      bind();
+    } catch (e) {
+      report("bind 失败: " + (e && e.message));
+      toast("界面初始化失败：" + (e && e.message), "err");
+    }
     const api = py();
     if (api) {
       try {
@@ -490,6 +532,16 @@
     tickTimer = setInterval(updateClock, 1000);
     pollLoop();
   }
+
+  // 看门狗：8 秒还没桥接成功，就把问题摆到界面上，不留给用户"点了没反应"
+  setTimeout(() => {
+    if (!py()) {
+      const st = $("statusText");
+      if (st) st.textContent = "界面未连接后台";
+      markBroken("未连接后台");
+      toast("界面没能连上后台，请关闭后重新打开", "err");
+    }
+  }, 8000);
 
   window.addEventListener("pywebviewready", boot);
   if (window.pywebview) boot();

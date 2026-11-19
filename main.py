@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -17,6 +18,28 @@ WEB_DIR = ROOT / "app" / "ui" / "web"
 
 WIDTH, HEIGHT = 468, 712
 _DEBUG = "--debug" in sys.argv
+
+
+def _ensure_stdio() -> None:
+    """pythonw.exe 启动时没有控制台，stdout/stderr 是 None。
+
+    WebView2/.NET 初始化会往标准输出写东西，句柄失效会导致窗口创建静默失败
+    （进程活着但永远不出现窗口）。这里把 fd 1/2 接到日志文件上，两头都补。
+    """
+    log = ROOT / "data" / "logs" / "app.log"
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+    for fd, name in ((1, "stdout"), (2, "stderr")):
+        try:
+            f = open(log, "a", encoding="utf-8", buffering=1)
+            os.dup2(f.fileno(), fd)
+            stream = getattr(sys, name)
+            if stream is None:
+                setattr(sys, name, f)
+        except Exception:
+            pass
 
 
 def _enable_dpi() -> None:
@@ -40,6 +63,7 @@ def _screen_size() -> tuple[int, int]:
 
 
 def main() -> None:
+    _ensure_stdio()
     _enable_dpi()
     import webview
 
@@ -75,7 +99,7 @@ def main() -> None:
         text_select=True,
         min_size=(WIDTH, HEIGHT),
     )
-    bridge.window = window
+    bridge.attach_window(window)
 
     def on_closing() -> bool:
         try:
