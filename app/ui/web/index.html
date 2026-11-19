@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>桌面助理</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="titlebar">
+    <div class="brand">
+      <span class="logo"></span>
+      <span class="brand-name">桌面助理</span>
+    </div>
+    <div class="win-btns">
+      <button class="win-btn" id="btnMin" title="最小化">
+        <svg width="11" height="11" viewBox="0 0 11 11"><path d="M2 5.5h7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      </button>
+      <button class="win-btn close" id="btnClose" title="关闭">
+        <svg width="11" height="11" viewBox="0 0 11 11"><path d="M2.5 2.5l6 6M8.5 2.5l-6 6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card status-card">
+      <div class="status-row">
+        <span class="dot idle" id="dot"></span>
+        <span class="status-text" id="statusText">未开始</span>
+        <span class="clock" id="clock"></span>
+      </div>
+      <div class="meters">
+        <div class="meter-row">
+          <span class="mlabel">麦克风</span>
+          <div class="meter"><i id="mMic" class="mic"></i></div>
+        </div>
+        <div class="meter-row">
+          <span class="mlabel">系统声</span>
+          <div class="meter"><i id="mSys" class="sys"></i></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card feed-card">
+      <div class="feed-head">
+        <span class="feed-title">实时记录</span>
+        <span class="feed-count" id="count">今天 0 条</span>
+      </div>
+      <div class="feed" id="feed">
+        <div class="empty" id="empty">
+          <div class="empty-ico"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#CBD2DB" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/><path d="M9 21h6"/></svg></div>
+          <div class="empty-t1">还没有记录</div>
+          <div class="empty-t2">点击「开始监听」，识别到的内容会实时出现在这里</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="actions">
+      <button class="btn primary" id="btnListen">开始监听</button>
+      <button class="btn outline-danger" id="btnMeeting">开始会议</button>
+    </div>
+    <div class="actions">
+      <button class="btn ghost" id="btnDaily">生成今日日报</button>
+      <button class="btn ghost" id="btnHistory">历史记录</button>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <span class="foot-item" id="footAsr">识别 · 未启动</span>
+    <span class="foot-item" id="footLlm"></span>
+    <a class="foot-link" id="btnSettings">设置</a>
+  </footer>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- 设置面板 -->
+  <div class="sheet" id="sheetSettings">
+    <div class="sheet-head">
+      <span class="sheet-title">设置</span>
+      <button class="icon-btn" data-close="sheetSettings">✕</button>
+    </div>
+    <div class="sheet-body">
+
+      <div class="group">
+        <div class="group-title">录音来源</div>
+        <label class="check"><input type="checkbox" id="cbMic"><span>麦克风（自己说话）</span></label>
+        <label class="check"><input type="checkbox" id="cbSys"><span>系统声音（会议对方）</span></label>
+        <div class="field">
+          <label>麦克风设备</label>
+          <select id="selMic"></select>
+        </div>
+        <p class="hint">会议场景请保持「系统声音」开启，否则录不到对方。</p>
+      </div>
+
+      <div class="group">
+        <div class="group-title">语音识别</div>
+        <div class="field">
+          <label>引擎模型</label>
+          <select id="selModel">
+            <option value="sensevoice">SenseVoice · 中英混说，带标点（推荐）</option>
+            <option value="paraformer-small">Paraformer 轻量 · 纯中文，体积小</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>识别语言</label>
+          <select id="selLang">
+            <option value="auto">自动（中英混说）</option>
+            <option value="zh">中文</option>
+            <option value="en">英文</option>
+          </select>
+        </div>
+        <p class="hint">全部在本机离线运行，音频不上传。首次使用会自动下载模型。</p>
+      </div>
+
+      <div class="group">
+        <div class="group-title">大模型 <span class="group-sub">用于总结与纪要</span></div>
+        <div class="presets" id="presets">
+          <button data-url="https://api.deepseek.com/v1" data-model="deepseek-chat">DeepSeek</button>
+          <button data-url="https://dashscope.aliyuncs.com/compatible-mode/v1" data-model="qwen-plus">通义千问</button>
+          <button data-url="https://api.moonshot.cn/v1" data-model="moonshot-v1-8k">Kimi</button>
+          <button data-url="https://open.bigmodel.cn/api/paas/v4" data-model="glm-4-flash">智谱</button>
+          <button data-url="https://api.siliconflow.cn/v1" data-model="Qwen/Qwen2.5-7B-Instruct">硅基流动</button>
+          <button data-url="http://127.0.0.1:11434/v1" data-model="qwen2.5:7b">本地 Ollama</button>
+        </div>
+        <div class="field"><label>接口地址</label><input type="text" id="inBase" placeholder="https://api.deepseek.com/v1"></div>
+        <div class="field"><label>API Key</label><input type="text" id="inKey" placeholder="sk-..."></div>
+        <div class="field"><label>模型名</label><input type="text" id="inModel" placeholder="deepseek-chat"></div>
+        <div class="test-row">
+          <button class="btn mini" id="btnTest">测试连接</button>
+          <span class="test-msg" id="testMsg"></span>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">自动日报</div>
+        <label class="check"><input type="checkbox" id="cbDaily"><span>每天定时生成今日日报</span></label>
+        <div class="field"><label>生成时间</label><input type="text" id="inTime" placeholder="18:30" style="max-width:90px"></div>
+        <label class="check"><input type="checkbox" id="cbTop"><span>窗口置顶</span></label>
+      </div>
+
+    </div>
+    <div class="sheet-foot">
+      <button class="btn ghost" data-close="sheetSettings">取消</button>
+      <button class="btn primary" id="btnSave">保存</button>
+    </div>
+  </div>
+
+  <!-- 历史面板 -->
+  <div class="sheet" id="sheetHistory">
+    <div class="sheet-head">
+      <span class="sheet-title">历史记录</span>
+      <button class="icon-btn" data-close="sheetHistory">✕</button>
+    </div>
+    <div class="hist-body">
+      <div class="hist-list" id="histList"></div>
+      <div class="hist-preview" id="histPreview">
+        <div class="empty"><div class="empty-t2">选择左侧记录查看内容</div></div>
+      </div>
+    </div>
+    <div class="sheet-foot">
+      <button class="btn ghost" id="btnOpenDir">打开文件夹</button>
+      <button class="btn primary" id="btnOpenFile">用默认程序打开</button>
+    </div>
+  </div>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>

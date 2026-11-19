@@ -1,0 +1,24 @@
+# 虚拟环境与依赖
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 识别模型（体积大，首次运行自动下载到 models/）
+models/
+
+# 本地数据：录音记录、报告、日志、配置（配置里含 API Key）
+data/sessions/
+data/reports/
+data/logs/
+data/settings.json
+data/_*
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

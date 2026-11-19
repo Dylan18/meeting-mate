@@ -1,0 +1,5 @@
+# 统一换行符，避免 Windows 脚本在 clone 后失效
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.onnx binary
