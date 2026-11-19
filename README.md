@@ -158,7 +158,7 @@ data/
 ## 目录结构
 
 ```
-desktop-assistant/
+meeting-mate/
 ├── 启动.bat                一键启动（首次自动装环境）
 ├── main.py                 入口：创建窗口、加载位置记忆
 ├── requirements.txt
