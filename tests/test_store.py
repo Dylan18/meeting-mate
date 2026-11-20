@@ -12,8 +12,10 @@ from app import store
 def tmp_dirs(tmp_path, monkeypatch):
     (tmp_path / "sessions").mkdir()
     (tmp_path / "reports").mkdir()
+    (tmp_path / "meetings").mkdir()
     monkeypatch.setattr(store, "SESSION_DIR", tmp_path / "sessions")
     monkeypatch.setattr(store, "REPORT_DIR", tmp_path / "reports")
+    monkeypatch.setattr(store, "MEETING_DIR", tmp_path / "meetings")
     return tmp_path
 
 
@@ -82,3 +84,50 @@ def test_segments_between_filters_by_time():
     store.append_segment({"ts": 1.7e9, "text": "b"})
     got = store.segments_between(datetime.fromtimestamp(1e9), datetime.fromtimestamp(1.5e9))
     assert [r["text"] for r in got] == ["a"]
+
+
+def test_meeting_sidecar_keeps_transcript(tmp_dirs):
+    start = datetime(2026, 11, 20, 10, 24)
+    segs = [{"ts": start.timestamp(), "text": "确认下周一上线"}]
+    path = store.write_meeting_report(start, "上线会", "## 会议摘要\n聊上线",
+                                      {"end": datetime(2026, 11, 20, 10, 40),
+                                       "duration": "16 分钟", "segments": 1,
+                                       "transcript": segs, "engine": "local",
+                                       "note": "AI 被拦，本地整理"})
+    data = store.load_meeting_data(path)
+    assert data["engine"] == "local"
+    assert data["segments"][0]["text"] == "确认下周一上线"
+    assert store.meeting_data_path(path).parent.name == "meetings"
+
+
+def test_meeting_sidecar_absent_when_no_transcript(tmp_dirs):
+    path = store.write_meeting_report(datetime(2026, 11, 20, 9, 0), "", "## 会议摘要\nx")
+    assert store.load_meeting_data(path) is None
+
+
+def test_meeting_span_from_header(tmp_dirs):
+    start = datetime(2026, 11, 20, 10, 24)
+    path = store.write_meeting_report(start, "上线会", "## 会议摘要\nx",
+                                      {"end": datetime(2026, 11, 20, 10, 40),
+                                       "duration": "16 分钟", "segments": 3})
+    got = store.meeting_span(path.read_text(encoding="utf-8"), path.stem)
+    assert got[0] == start
+    assert got[1] == datetime(2026, 11, 20, 10, 40)
+
+
+def test_meeting_span_falls_back_to_filename():
+    got = store.meeting_span("没有任何元信息", "会议_20261120_1024_上线会")
+    assert got[0] == datetime(2026, 11, 20, 10, 24)
+
+
+def test_meeting_report_can_overwrite_existing_path(tmp_dirs):
+    """重新整理必须覆盖原文件，不能因为标题变了就多出一份副本。"""
+    start = datetime(2026, 11, 20, 10, 24)
+    p = tmp_dirs / "reports" / "会议_20261120_1024.md"
+    p.write_text("坏内容", encoding="utf-8")
+    got = store.write_meeting_report(start, "新标题", "## 会议摘要\n新内容",
+                                     {"duration": "1 分钟"}, path=p)
+    assert got == p
+    text = p.read_text(encoding="utf-8")
+    assert text.startswith("# 新标题")
+    assert "坏内容" not in text

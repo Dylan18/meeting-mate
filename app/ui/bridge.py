@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from datetime import date, datetime
@@ -37,6 +38,63 @@ def _within(path: Path, root: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _first_heading(md: str) -> str:
+    for line in (md or "").splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return ""
+
+
+def _meeting_label(p: Path, data: dict) -> str:
+    """列表里显示的名字：优先真标题，退化成「10:24 会议」，别甩一串文件名。"""
+    title = store._read_title(p) or data.get("title") or ""
+    if title and title != "会议纪要":
+        return title
+    m = re.search(r"会议_(\d{8})_(\d{4})", p.stem)
+    if m:
+        hm = m.group(2)
+        return f"{hm[:2]}:{hm[2:]} 会议"
+    return p.stem
+
+
+def _parse_dt(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    s = str(value or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(s[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _span_text(start, end) -> tuple[str, str]:
+    """元信息里别把完整日期写两遍：同一天只显示一次日期。"""
+    s, e = _parse_dt(start), _parse_dt(end)
+    if not s:
+        return str(start or ""), str(end or "")
+    stxt = s.strftime("%Y-%m-%d %H:%M")
+    if not e:
+        return stxt, ""
+    if e.date() == s.date():
+        return stxt, e.strftime("%H:%M")
+    return stxt, e.strftime("%Y-%m-%d %H:%M")
+
+
+def _body_of(md: str) -> str:
+    """去掉一级标题和引用行（header），只留正文，用于判断内容是否有效。"""
+    out = []
+    for line in (md or "").splitlines():
+        s = line.strip()
+        if s.startswith("# ") or s.startswith(">"):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
 
 
 class Bridge:
@@ -216,13 +274,21 @@ class Bridge:
         for p in store.list_reports():
             try:
                 st = p.stat()
-                out.append({
+                kind = "meeting" if p.name.startswith("会议") else "daily"
+                item = {
                     "path": str(p),
                     "name": p.stem,
-                    "kind": "meeting" if p.name.startswith("会议") else "daily",
+                    "kind": kind,
                     "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
                     "size": st.st_size,
-                })
+                    "engine": "",
+                    "title": "",
+                }
+                if kind == "meeting":
+                    data = store.load_meeting_data(p) or {}
+                    item["engine"] = data.get("engine", "")
+                    item["title"] = _meeting_label(p, data)
+                out.append(item)
             except Exception as e:
                 log_exc(f"bridge.list_reports 跳过 {p.name}", e)
                 continue
@@ -236,6 +302,66 @@ class Bridge:
             return {"ok": True, "text": p.read_text(encoding="utf-8")}
         except Exception as e:
             return {"ok": False, "text": f"读取失败：{e}"}
+
+    # ------------------------------------------------------------ 会议详情页
+    def read_meeting(self, path: str) -> dict:
+        """会议详情：整理后的纪要 + 逐句原文，一次取回给界面用。"""
+        try:
+            p = Path(path).resolve()
+            if not _within(p, REPORT_DIR) or not p.name.startswith("会议"):
+                return {"ok": False, "msg": "路径不合法"}
+            md = p.read_text(encoding="utf-8")
+        except Exception as e:
+            return {"ok": False, "msg": f"读取失败：{e}"}
+
+        data = store.load_meeting_data(p) or {}
+        info = store.parse_meeting_header(md)
+        segs = data.get("segments") or []
+        if not segs:
+            # 老版本生成的纪要没有 sidecar，用时间区间回查当天转写
+            span = store.meeting_span(md, p.stem)
+            if span:
+                segs = [{"ts": r.get("ts", 0), "text": (r.get("text") or "").strip()}
+                        for r in store.segments_between(*span) if (r.get("text") or "").strip()]
+
+        title = _first_heading(md) or data.get("title") or p.stem
+        raw_start = data.get("start") or (f"{info['date']} {info['start']}" if info else "")
+        raw_end = data.get("end") or (f"{info['date']} {info['end']}"
+                                      if info and info.get("end") else "")
+        start_txt, end_txt = _span_text(raw_start, raw_end)
+        meta = {
+            "start": start_txt,
+            "end": end_txt,
+            "duration": data.get("duration") or info.get("duration", ""),
+            "segments": len(segs) or info.get("segments", 0),
+        }
+        note = data.get("note", "")
+        body = _body_of(md)
+        # 早期版本会把网关的英文报错当成模型回答写进文件，这里标出来
+        if llm.is_refusal(body) or len(body.replace("#", "").strip()) < 6:
+            note = "这份纪要内容无效（早期版本把接口报错写进了文件），点下方「重新整理」可重新生成。"
+        return {
+            "ok": True,
+            "path": str(p),
+            "title": title,
+            "meta": meta,
+            # 页面上已经有标题和元信息，正文里再画一遍就重复了
+            "minutes": body,
+            "transcript": segs,
+            "engine": data.get("engine", ""),
+            "note": note,
+        }
+
+    def redo_meeting(self, path: str) -> dict:
+        """重新整理：立即返回，进度通过事件推送，避免把界面卡住。"""
+        try:
+            p = Path(path).resolve()
+            if not _within(p, REPORT_DIR) or not p.name.startswith("会议"):
+                return {"ok": False, "msg": "路径不合法"}
+        except Exception as e:
+            return {"ok": False, "msg": str(e)}
+        self._asst.resummarize(p)
+        return {"ok": True}
 
     def open_path(self, path: str) -> dict:
         """只允许打开 data 目录下的文件，避免页面被注入后能启动任意可执行文件。"""

@@ -153,6 +153,29 @@
     </div>
   </div>
 
+  <!-- 会议详情 -->
+  <div class="sheet" id="sheetMeeting">
+    <div class="sheet-head">
+      <span class="sheet-title" id="mtTitle">会议纪要</span>
+      <button class="icon-btn" data-close="sheetMeeting" aria-label="关闭">✕</button>
+    </div>
+    <div class="mt-meta" id="mtMeta"></div>
+    <div class="mt-tabs">
+      <button class="mt-tab active" id="tabMinutes" data-tab="minutes">纪要</button>
+      <button class="mt-tab" id="tabRaw" data-tab="raw">原文<span class="mt-badge" id="mtRawCount"></span></button>
+    </div>
+    <div class="mt-note" id="mtNote"></div>
+    <div class="mt-body">
+      <div class="mt-pane active" id="mtMinutes"></div>
+      <div class="mt-pane" id="mtRaw"></div>
+    </div>
+    <div class="sheet-foot">
+      <button class="btn ghost" id="btnRedo">重新整理</button>
+      <button class="btn ghost" id="btnMtOpenFile">用默认程序打开</button>
+      <button class="btn primary" data-close="sheetMeeting">完成</button>
+    </div>
+  </div>
+
   <!-- 历史面板 -->
   <div class="sheet" id="sheetHistory">
     <div class="sheet-head">

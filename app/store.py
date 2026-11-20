@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from .config import REPORT_DIR, SESSION_DIR
+from .config import MEETING_DIR, REPORT_DIR, SESSION_DIR
 from .log import log_exc
 
 _lock = threading.RLock()
@@ -114,7 +115,9 @@ def meeting_report_path(start: datetime, topic: str = "") -> Path:
     return REPORT_DIR / (f"{base}_{safe}.md" if safe else f"{base}.md")
 
 
-def write_meeting_report(start: datetime, title: str, body: str, meta: dict | None = None) -> Path:
+def write_meeting_report(start: datetime, title: str, body: str, meta: dict | None = None,
+                         path: Path | None = None) -> Path:
+    """写会议纪要。`path` 用于「重新整理」：必须覆盖原文件，否则会多出一份同名不同标题的副本。"""
     meta = meta or {}
     end = meta.get("end")
     end_txt = end.strftime("%H:%M") if isinstance(end, datetime) else ""
@@ -128,7 +131,90 @@ def write_meeting_report(start: datetime, title: str, body: str, meta: dict | No
     clean = body.lstrip()
     if clean.startswith("# "):     # 模型自己给了标题，避免和 header 重复
         clean = "\n".join(clean.splitlines()[1:]).strip()
-    return _write_atomic(meeting_report_path(start, title or ""), header + clean + "\n")
+    target = Path(path) if path else meeting_report_path(start, title or "")
+    path = _write_atomic(target, header + clean + "\n")
+
+    # 纪要正文之外还要单独存一份结构化数据：界面上的「原文」标签页、以及事后
+    # 重新整理，都需要完整的逐句转写，而不是一堆挤在 markdown 里的文本行。
+    payload = {
+        "title": title or "",
+        "start": start.isoformat(timespec="seconds"),
+        "end": end.isoformat(timespec="seconds") if isinstance(end, datetime) else "",
+        "duration": meta.get("duration", ""),
+        "engine": meta.get("engine", ""),     # llm / local / none
+        "note": meta.get("note", ""),
+        "segments": meta.get("transcript") or [],
+    }
+    if meta.get("transcript") is not None:
+        save_meeting_data(path, payload)
+    return path
+
+
+# ------------------------------------------------------------------ 会议结构化数据
+def meeting_data_path(report: Path) -> Path:
+    return MEETING_DIR / (Path(report).stem + ".json")
+
+
+def save_meeting_data(report: Path, payload: dict) -> None:
+    path = meeting_data_path(report)
+    try:
+        _write_atomic(path, json.dumps(payload, ensure_ascii=False, indent=1))
+    except Exception as e:
+        log_exc(f"store.save_meeting_data 失败({path.name})", e)
+
+
+def load_meeting_data(report: Path) -> dict | None:
+    path = meeting_data_path(report)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        log_exc(f"store.load_meeting_data 失败({path.name})", e)
+        return None
+
+
+_HEADER_RE = re.compile(
+    r"(?P<date>\d{4}-\d{2}-\d{2})\s+(?P<start>\d{2}:\d{2})"
+    r"(?:\s*[—\-–~]\s*(?P<end>\d{2}:\d{2}))?"
+    r".*?时长\s*(?P<dur>[^｜|\n]+)"
+    r"(?:.*?转写\s*(?P<segs>\d+)\s*段)?"
+)
+
+
+def parse_meeting_header(md: str) -> dict:
+    """老报告没有 sidecar 时，从引用行里把时间/时长捞出来，用于回查转写原文。"""
+    for line in (md or "").splitlines():
+        if not line.startswith(">"):
+            continue
+        m = _HEADER_RE.search(line)
+        if not m:
+            continue
+        return {"date": m.group("date"), "start": m.group("start"),
+                "end": m.group("end") or "", "duration": (m.group("dur") or "").strip(),
+                "segments": int(m.group("segs") or 0)}
+    return {}
+
+
+def meeting_span(md: str, fallback_name: str = "") -> tuple[datetime, datetime] | None:
+    """解析一场会议的时间区间，优先信 header，其次信文件名。"""
+    info = parse_meeting_header(md)
+    try:
+        if info:
+            start = datetime.strptime(f"{info['date']} {info['start']}", "%Y-%m-%d %H:%M")
+            end = (datetime.strptime(f"{info['date']} {info['end']}", "%Y-%m-%d %H:%M")
+                   if info.get("end") else start + timedelta(hours=2))
+            if end <= start:      # 跨零点
+                end += timedelta(days=1)
+            return start, end
+    except Exception as e:
+        log_exc("store.meeting_span 解析 header 失败", e)
+    m = re.search(r"会议_(\d{8})_(\d{4})", fallback_name or "")
+    if m:
+        start = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M")
+        return start, start + timedelta(hours=2)
+    return None
+
 
 
 def list_reports() -> list[Path]:

@@ -42,10 +42,29 @@ CHUNK_CHARS = 9000
 _REDUCE_WORKERS = 3
 _MAX_TOKENS_CAP = 8000
 _RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+# 内容风控是概率性的：同一段文本重复请求，实测约 1/3 会被拒。所以这类
+# "拒绝"要当临时故障重试，绝不能当成模型回答写进纪要。
+_REFUSAL_RETRY = 2
+_REFUSAL_PAT = re.compile(
+    r"high risk|was rejected|rejected because|risk control|content[_ ]?policy"
+    r"|moderation|inappropriate content|violat\w+ (?:policy|guideline)"
+    r"|i(?:'m| am) sorry,? (?:but )?i (?:can'?t|cannot|am unable)"
+    r"|作为(?:一个)?(?:AI|人工智能)|无法协助|抱歉[，,]?我无法",
+    re.IGNORECASE,
+)
 
 
 class LLMError(Exception):
     pass
+
+
+class LLMRefused(LLMError):
+    """服务端按内容风控拒答（通常是可重试的偶发情况）。"""
+
+
+def is_refusal(text: str) -> bool:
+    head = (text or "").strip()[:400]
+    return bool(head) and bool(_REFUSAL_PAT.search(head))
 
 
 def _cfg(override: dict | None = None) -> dict:
@@ -62,18 +81,26 @@ def chat(messages: list[dict], max_tokens: int = 2400, temperature: float = 0.3,
          cfg: dict | None = None) -> str:
     c = _cfg(cfg)
     budget = max_tokens
-    content = ""
-    for attempt in (0, 1):
+    bumped = False
+    refused = 0
+    while True:
         content, finish = _request(c, messages, budget, temperature)
+        if is_refusal(content):
+            refused += 1
+            if refused <= _REFUSAL_RETRY:
+                log_exc("llm.chat 被风控拦截，重试", f"第 {refused} 次：{content[:120]}", level=30)
+                time.sleep(1.2 * refused)
+                continue
+            raise LLMRefused(content.strip()[:160] or "请求被服务端拒绝")
         if finish == "length":
-            if attempt == 0 and budget < _MAX_TOKENS_CAP:
+            if not bumped and budget < _MAX_TOKENS_CAP:
                 budget = min(_MAX_TOKENS_CAP, int(budget * 1.8))
+                bumped = True
                 log_exc("llm.chat 输出触顶，加倍重试", f"{max_tokens} → {budget}", level=30)
                 continue
             # 拉满还截断：保留已有内容，但必须让用户知道少了尾巴
             return "> ⚠️ 输出达到模型上限，以下内容可能不完整，建议缩短录音时长后重试。\n\n" + _clean(content)
         return _clean(content)
-    return _clean(content)
 
 
 def _request(c: dict, messages: list[dict], max_tokens: int, temperature: float) -> tuple[str, str]:

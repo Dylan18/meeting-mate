@@ -117,3 +117,35 @@ def test_fallback_daily_includes_meeting_digests():
         {"title": "排期会", "digest": "## 关键结论\n下周一上线"}
     ])
     assert "排期会" in body and "下周一上线" in body
+
+
+# ---------------------------------------------------------------- 内容风控
+BAD = "The request was rejected because it was considered high risk"
+
+
+def test_is_refusal_recognizes_gateway_message():
+    assert llm.is_refusal(BAD)
+    assert llm.is_refusal("抱歉，我无法协助完成这个请求。")
+    assert llm.is_refusal("I'm sorry, but I cannot help with that.")
+    # 正常纪要里出现"风险"不能被误判
+    assert not llm.is_refusal("## 待确认 / 风险\n- 上线时间有风险")
+    assert not llm.is_refusal("## 会议摘要\n讨论了风控策略")
+
+
+def test_chat_retries_refusal_then_succeeds(monkeypatch):
+    seq = [_ok(BAD), _ok(BAD), _ok("## 会议摘要\n正常内容")]
+
+    def fake_post(*a, **k):
+        return seq.pop(0)
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    out = llm.chat([{"role": "user", "content": "x"}], cfg=CFG)
+    assert "正常内容" in out
+
+
+def test_chat_raises_refused_after_retries(monkeypatch):
+    """重试完仍被拒，必须抛错 —— 绝不能把这句话当模型回答返回。"""
+    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: _ok(BAD))
+    with pytest.raises(llm.LLMRefused) as ei:
+        llm.chat([{"role": "user", "content": "x"}], cfg=CFG)
+    assert "high risk" in str(ei.value)

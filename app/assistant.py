@@ -14,8 +14,9 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import date, datetime
+from pathlib import Path
 
-from . import llm, store
+from . import llm, minutes, store
 from .asr import Transcriber
 from .audio import AudioHub
 from .config import config
@@ -207,34 +208,101 @@ class Assistant:
             if not text.strip():
                 _emit(self.on_event, "notice", "这场会议没有识别到有效语音内容。")
                 return
-            title = None
-            if llm.llm_ready():
-                body = llm.summarize_meeting(
-                    text, m["start"], m["end"], m.get("topic") or None,
-                    progress=lambda s: _emit(self.on_event, "busy", s),
-                )
-                title = _extract_title(body)
-            else:
-                body = (
-                    "## 会议摘要\n未配置大模型，以下为原始转写内容。\n\n"
-                    f"## 转写原文\n{text}\n"
-                )
+            body, engine, note = self._make_minutes(recs, text, m)
+            title = _extract_title(body) if engine == "llm" else None
             secs = int((m["end"] - m["start"]).total_seconds())
             dur_txt = f"{secs // 60} 分钟" if secs >= 60 else f"{max(1, secs)} 秒"
             path = store.write_meeting_report(m["start"], title or "", body, {
                 "end": m["end"],
                 "duration": dur_txt,
                 "segments": len(recs),
+                "transcript": _transcript(recs),
+                "engine": engine,
+                "note": note,
             })
             day = m["start"].strftime("%Y-%m-%d")
             if title:
                 self.meeting_titles.setdefault(day, []).append(title)
-            _emit(self.on_event, "report_ready", {"path": str(path), "kind": "meeting", "title": title})
+            if note:
+                _emit(self.on_event, "notice", note)
+            _emit(self.on_event, "report_ready",
+                  {"path": str(path), "kind": "meeting", "title": title,
+                   "engine": engine, "note": note})
         except Exception as e:
             log_exc("assistant 生成会议纪要失败", e)
             _emit(self.on_event, "error", f"会议纪要生成失败：{e}")
         finally:
             self._end_job()
+
+    def _make_minutes(self, recs: list[dict], text: str, m: dict) -> tuple[str, str, str]:
+        """返回 (正文, 引擎, 需要告诉用户的提示)。
+
+        大模型不可用、被风控拦截、或压根没配 Key，都退到本地规则整理 ——
+        纪要必须永远有内容，而不是一句英文报错。
+        """
+        if not llm.llm_ready():
+            return (minutes.local_meeting(recs, m["start"], m["end"], m.get("topic")),
+                    "local", "未配置大模型，本次纪要由本地规则整理（可在设置里配置后重新整理）")
+        try:
+            body = llm.summarize_meeting(
+                text, m["start"], m["end"], m.get("topic") or None,
+                progress=lambda s: _emit(self.on_event, "busy", s),
+            )
+            if not body.strip():
+                raise llm.LLMError("模型返回空内容")
+            return body, "llm", ""
+        except llm.LLMRefused as e:
+            log_exc("会议纪要被模型风控拦截，改用本地整理", e)
+            return (minutes.local_meeting(recs, m["start"], m["end"], m.get("topic")),
+                    "local", "AI 整理被服务端风控拦下（已重试），本次改用本地规则整理，可稍后点「重新整理」")
+        except Exception as e:
+            log_exc("会议纪要 AI 整理失败，改用本地整理", e)
+            return (minutes.local_meeting(recs, m["start"], m["end"], m.get("topic")),
+                    "local", f"AI 整理失败（{str(e)[:60]}），本次由本地规则整理")
+
+    def resummarize(self, report: Path) -> None:
+        """对已有会议重新生成纪要（模型换了、或上次被风控拦了）。"""
+        if not self._try_begin("正在重新整理会议纪要…"):
+            _emit(self.on_event, "notice", "还有任务在进行，请稍候再试。")
+            return
+
+        def work() -> None:
+            try:
+                md = report.read_text(encoding="utf-8")
+                span = store.meeting_span(md, report.stem)
+                if not span:
+                    _emit(self.on_event, "error", "这份记录里找不到会议时间，无法重新整理")
+                    return
+                start, end = span
+                data = store.load_meeting_data(report) or {}
+                segs = data.get("segments") or _transcript(
+                    store.segments_between(start, end))
+                if not segs:
+                    _emit(self.on_event, "error", "找不到这场会议的转写原文，无法重新整理")
+                    return
+                recs = [{"ts": s.get("ts", 0), "text": s.get("text", "")} for s in segs]
+                body, engine, note = self._make_minutes(recs, store.render(recs),
+                                                       {"start": start, "end": end,
+                                                        "topic": data.get("title", "")})
+                title = _extract_title(body) if engine == "llm" else (data.get("title") or "")
+                secs = int((end - start).total_seconds())
+                dur_txt = f"{secs // 60} 分钟" if secs >= 60 else f"{max(1, secs)} 秒"
+                path = store.write_meeting_report(start, title or "", body, {
+                    "end": end, "duration": dur_txt, "segments": len(recs),
+                    "transcript": segs, "engine": engine, "note": note,
+                }, path=report)
+                if note:
+                    _emit(self.on_event, "notice", note)
+                _emit(self.on_event, "report_ready",
+                      {"path": str(path), "kind": "meeting", "title": title,
+                       "engine": engine, "note": note, "redo": True})
+            except Exception as e:
+                log_exc("assistant.resummarize 失败", e)
+                _emit(self.on_event, "error", f"重新整理失败：{e}")
+            finally:
+                self._end_job()
+
+        threading.Thread(target=work, daemon=True, name="redo-meeting").start()
 
     # ------------------------------------------------------------ 日报
     def generate_daily(self, day: str | None = None, silent_if_empty: bool = True) -> bool:
@@ -257,11 +325,18 @@ class Assistant:
                     return
                 if llm.llm_ready():
                     titles = self.meeting_titles.get(day_label) or store.meeting_titles_for(day_label)
-                    body = llm.summarize_day(
-                        text, day_label, meeting_titles=titles or None,
-                        meeting_digests=digests,
-                        progress=lambda s: _emit(self.on_event, "busy", s),
-                    )
+                    try:
+                        body = llm.summarize_day(
+                            text, day_label, meeting_titles=titles or None,
+                            meeting_digests=digests,
+                            progress=lambda s: _emit(self.on_event, "busy", s),
+                        )
+                    except Exception as e:
+                        # 和会议纪要一样：AI 挂了也要有一份能看的日报，而不是什么都不产出
+                        log_exc("日报 AI 整理失败，改用本地整理", e)
+                        body = minutes.local_daily(recs, day_label, digests=digests)
+                        _emit(self.on_event, "notice",
+                              f"AI 整理失败（{str(e)[:60]}），日报已用本地规则生成")
                 else:
                     body = llm.fallback_daily(recs, day_label, digests=digests)
                 path = store.write_daily_report(day_label, body, {"segments": len(recs)})
@@ -311,3 +386,14 @@ def _extract_title(body: str) -> str | None:
             if t:
                 return t[:40]
     return None
+
+
+def _transcript(recs: list[dict]) -> list[dict]:
+    """会议原文的持久化形态：只要时间 + 文本，不要 scope 之类的内部字段。"""
+    out = []
+    for r in recs or []:
+        txt = (r.get("text") or "").strip()
+        if not txt:
+            continue
+        out.append({"ts": float(r.get("ts", 0) or 0), "text": txt})
+    return out

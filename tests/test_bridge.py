@@ -48,3 +48,51 @@ def test_within_helper():
     root = Path.cwd()
     assert _within(root / "a" / "b.md", root) is True
     assert _within(Path("C:/Windows/win.ini"), root) is False
+
+
+# ---------------------------------------------------------------- 会议详情
+def test_read_meeting_rejects_non_meeting_path(tmp_path, monkeypatch):
+    import app.ui.bridge as bm
+    monkeypatch.setattr(bm, "REPORT_DIR", tmp_path)
+    p = tmp_path / "日报_2026-11-20.md"
+    p.write_text("# x", encoding="utf-8")
+    b = Bridge(start_scheduler=False)
+    assert b.read_meeting(str(p))["ok"] is False
+
+
+def test_read_meeting_flags_legacy_broken_minutes(tmp_path, monkeypatch):
+    """早期版本把网关报错写进文件，详情页要明确告诉用户「这份无效」。"""
+    import app.ui.bridge as bm
+    from app import store
+    monkeypatch.setattr(bm, "REPORT_DIR", tmp_path)
+    monkeypatch.setattr(store, "REPORT_DIR", tmp_path)
+    p = tmp_path / "会议_20261120_1024.md"
+    p.write_text(
+        "# 会议纪要\n\n> 2026-11-20 10:24 — 10:40 ｜ 时长 16 分钟 ｜ 转写 3 段\n\n"
+        "The request was rejected because it was considered high risk\n",
+        encoding="utf-8",
+    )
+    r = Bridge(start_scheduler=False).read_meeting(str(p))
+    assert r["ok"] is True
+    assert "无效" in r["note"]
+
+
+def test_read_meeting_returns_transcript_from_sidecar(tmp_path, monkeypatch):
+    import app.ui.bridge as bm
+    from app import store
+    monkeypatch.setattr(bm, "REPORT_DIR", tmp_path)
+    monkeypatch.setattr(store, "REPORT_DIR", tmp_path)
+    monkeypatch.setattr(store, "MEETING_DIR", tmp_path / "meetings")
+    (tmp_path / "meetings").mkdir()
+    from datetime import datetime
+    start = datetime(2026, 11, 20, 10, 24)
+    p = store.write_meeting_report(start, "上线会", "## 会议摘要\n聊上线",
+                                   {"end": datetime(2026, 11, 20, 10, 40),
+                                    "duration": "16 分钟", "segments": 2,
+                                    "engine": "local", "note": "AI 被拦",
+                                    "transcript": [{"ts": 1.0, "text": "第一句"},
+                                                   {"ts": 2.0, "text": "第二句"}]})
+    r = Bridge(start_scheduler=False).read_meeting(str(p))
+    assert r["title"] == "上线会"
+    assert [x["text"] for x in r["transcript"]] == ["第一句", "第二句"]
+    assert r["engine"] == "local" and r["note"] == "AI 被拦"

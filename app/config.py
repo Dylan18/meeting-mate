@@ -12,11 +12,12 @@ APP_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = APP_DIR / "data"
 REPORT_DIR = DATA_DIR / "reports"
 SESSION_DIR = DATA_DIR / "sessions"
+MEETING_DIR = DATA_DIR / "meetings"      # 会议的结构化数据（转写原文 + 元信息）
 MODEL_DIR = APP_DIR / "models"
 LOG_DIR = DATA_DIR / "logs"
 CONFIG_PATH = DATA_DIR / "settings.json"
 
-for _d in (DATA_DIR, REPORT_DIR, SESSION_DIR, MODEL_DIR, LOG_DIR):
+for _d in (DATA_DIR, REPORT_DIR, SESSION_DIR, MEETING_DIR, MODEL_DIR, LOG_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 DEFAULTS: dict[str, Any] = {

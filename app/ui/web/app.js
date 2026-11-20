@@ -32,6 +32,8 @@
   let pollTimer = null;
   let histItems = [];
   let histSelected = null;
+  let mtPath = null;
+  let mtTab = "minutes";
 
   // ---------------------------------------------------------------- 工具
   function hhmm(ts) {
@@ -185,9 +187,10 @@
         toast(String(d || ""), "err");
         break;
       case "report_ready":
-        toast((d.kind === "meeting" ? "会议纪要" : "日报") + "已生成", "ok");
-        openPath(d.path);
-        if ($("sheetHistory").classList.contains("open")) loadHistory();
+        toast((d.kind === "meeting" ? "会议纪要" : "日报") +
+              (d.engine === "local" ? "已生成（本地整理）" : "已生成"), "ok");
+        if (d.kind === "meeting") openMeeting(d.path);
+        else openHistoryTo(d.path);
         break;
       case "meeting_started":
         toast("会议记录已开始", "ok");
@@ -419,6 +422,94 @@
     return out.join("");
   }
 
+  // ---------------------------------------------------------------- 会议详情
+  function metaLine(r) {
+    const m = r.meta || {};
+    const parts = [];
+    if (m.start) parts.push(m.end && m.end !== m.start ? m.start + " — " + m.end : m.start);
+    if (m.duration) parts.push("时长 " + m.duration);
+    if (m.segments) parts.push("转写 " + m.segments + " 段");
+    parts.push(r.engine === "llm" ? "AI 整理" : r.engine === "local" ? "本地整理" : "来源未知");
+    return parts.join(" ｜ ");
+  }
+
+  function renderRaw(list) {
+    const box = $("mtRaw");
+    box.innerHTML = "";
+    if (!list.length) {
+      box.appendChild(el("div", "hist-empty", "没有找到这场会议的转写原文"));
+      return;
+    }
+    list.forEach((r) => {
+      const row = el("div", "raw-line");
+      row.appendChild(el("span", "rt", hhmm(r.ts)));
+      row.appendChild(el("span", "rc", r.text || ""));
+      box.appendChild(row);
+    });
+  }
+
+  function setMtTab(tab) {
+    mtTab = tab;
+    $("tabMinutes").classList.toggle("active", tab === "minutes");
+    $("tabRaw").classList.toggle("active", tab === "raw");
+    $("mtMinutes").classList.toggle("active", tab === "minutes");
+    $("mtRaw").classList.toggle("active", tab === "raw");
+  }
+
+  async function openMeeting(path) {
+    const api = py(); if (!api || !path) return;
+    try {
+      const r = await api.read_meeting(path);
+      if (!r || !r.ok) {
+        toast((r && r.msg) || "读取会议记录失败", "err");
+        return;
+      }
+      mtPath = r.path;
+      $("mtTitle").textContent = r.title || "会议纪要";
+      $("mtMeta").textContent = metaLine(r);
+      const note = $("mtNote");
+      if (r.note) {
+        note.textContent = r.note;
+        note.classList.add("show");
+      } else {
+        note.textContent = "";
+        note.classList.remove("show");
+      }
+      $("mtMinutes").innerHTML = mdToHtml(r.minutes || "");
+      renderRaw(r.transcript || []);
+      $("mtRawCount").textContent = (r.transcript || []).length ? " " + r.transcript.length : "";
+      setMtTab(mtTab);
+      openSheet("sheetMeeting");
+      $("mtMinutes").scrollTop = 0;
+      $("mtRaw").scrollTop = 0;
+    } catch (e) {
+      report("openMeeting: " + (e && e.message));
+      toast("打开会议记录失败：" + (e && e.message), "err");
+    }
+  }
+
+  async function redoMeeting() {
+    const api = py(); if (!api || !mtPath) return;
+    const btn = $("btnRedo");
+    btn.disabled = true;
+    btn.textContent = "整理中…";
+    try {
+      const r = await api.redo_meeting(mtPath);
+      if (r && r.ok === false) toast(r.msg || "无法重新整理", "err");
+      else toast("正在重新整理，完成后会自动刷新");
+    } catch (e) {
+      toast("重新整理失败：" + (e && e.message), "err");
+    }
+    setTimeout(() => { btn.disabled = false; btn.textContent = "重新整理"; }, 3000);
+  }
+
+  // 从历史里跳到某份日报
+  async function openHistoryTo(path) {
+    await openHistory();
+    const row = document.querySelector('.hist-item[data-path="' + path + '"]');
+    if (row) selectReport(path, row);
+  }
+
   // ---------------------------------------------------------------- 历史
   async function openHistory() {
     try {
@@ -445,14 +536,25 @@
         row.dataset.path = it.path;
         const top = el("div", "hi-top");
         top.appendChild(el("span", "badge " + it.kind, it.kind === "meeting" ? "会议" : "日报"));
-        top.appendChild(el("span", "hi-title", String(it.name).replace(/^(日报|会议)_/, "")));
+        top.appendChild(el("span", "hi-title",
+          it.title || String(it.name).replace(/^(日报|会议)_/, "")));
+        if (it.kind === "meeting" && it.engine === "local") {
+          top.appendChild(el("span", "badge local", "本地"));
+        }
         row.appendChild(top);
         row.appendChild(el("span", "hi-time", it.mtime));
-        row.addEventListener("click", () => selectReport(it.path, row));
+        row.addEventListener("click", () => {
+          document.querySelectorAll(".hist-item").forEach((n) => n.classList.remove("active"));
+          row.classList.add("active");
+          histSelected = it.path;
+          // 会议有独立的详情页（纪要 + 原文），日报还在右侧预览
+          if (it.kind === "meeting") openMeeting(it.path);
+          else selectReport(it.path, row);
+        });
         list.appendChild(row);
       });
-      if (!histSelected && histItems.length) {
-        selectReport(histItems[0].path, list.firstChild);
+      if (!histSelected && histItems.length && list.firstChild) {
+        list.firstChild.click();      // 会议/日报的首项行为不同，统一走点击
       }
     } catch (e) {
       report("loadHistory: " + (e && e.message));
@@ -554,6 +656,11 @@
     $("btnOpenFile").addEventListener("click", () => {
       if (histSelected) openPath(histSelected);
     });
+
+    $("tabMinutes").addEventListener("click", () => setMtTab("minutes"));
+    $("tabRaw").addEventListener("click", () => setMtTab("raw"));
+    $("btnRedo").addEventListener("click", redoMeeting);
+    $("btnMtOpenFile").addEventListener("click", () => { if (mtPath) openPath(mtPath); });
 
     document.querySelectorAll(".titlebar").forEach((n) => n.classList.add("pywebview-drag-region"));
 

@@ -323,6 +323,7 @@ main {
 .badge { font-size: 9.5px; padding: 1px 6px; border-radius: 5px; flex: 0 0 auto; }
 .badge.daily { background: #E8F3FF; color: #2F6BFF; }
 .badge.meeting { background: #F3EEFF; color: #7A63E8; }
+.badge.local { background: #FDF3E3; color: #B4761A; }
 
 .hist-preview {
   flex: 1; min-height: 0; overflow-y: auto;
@@ -354,3 +355,63 @@ main {
 .hist-preview table { border-collapse: collapse; width: 100%; margin: 4px 0 10px; font-size: 11px; }
 .hist-preview th, .hist-preview td { border: 1px solid #E7E9EE; padding: 5px 8px; text-align: left; }
 .hist-preview th { background: #F7F8FA; font-weight: 600; color: #4A5364; }
+
+/* ---------------- 会议详情 ---------------- */
+/* 从历史列表点进来时要盖在历史面板之上，否则看起来"点了没反应" */
+#sheetMeeting { z-index: 60; }
+.mt-meta { flex: 0 0 auto; padding: 0 18px 7px; font-size: 10.5px; color: var(--text3); }
+.mt-tabs { flex: 0 0 auto; display: flex; gap: 6px; padding: 0 16px 8px; }
+.mt-tab {
+  height: 28px; padding: 0 14px; border-radius: 14px;
+  background: #EFF2F7; color: #5A6478; font-size: 11.5px;
+  transition: background .15s, color .15s;
+}
+.mt-tab:hover { background: #E5EAF2; }
+.mt-tab.active { background: #fff; color: var(--accent); font-weight: 600; box-shadow: 0 1px 3px rgba(16,24,40,.08); }
+.mt-badge { font-size: 9.5px; color: var(--text3); margin-left: 3px; }
+
+.mt-note {
+  display: none; flex: 0 0 auto;
+  margin: 0 16px 8px; padding: 7px 10px; border-radius: 8px;
+  background: rgba(232,163,61,.10); border: 1px solid rgba(232,163,61,.30);
+  color: #8A5A11; font-size: 11px; line-height: 1.5; user-select: text;
+}
+.mt-note.show { display: block; }
+
+.mt-body { flex: 1; min-height: 0; display: flex; padding: 0 16px; }
+.mt-pane {
+  display: none; flex: 1; min-height: 0; overflow-y: auto;
+  background: #fff; border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px 14px; font-size: 11.5px; line-height: 1.72; color: #333A45;
+  word-break: break-word; user-select: text; cursor: text;
+}
+.mt-pane.active { display: block; }
+.mt-pane::-webkit-scrollbar { width: 6px; }
+.mt-pane::-webkit-scrollbar-thumb { background: #DCE1E8; border-radius: 3px; }
+
+.mt-pane h1 { font-size: 14px; margin: 2px 0 9px; }
+.mt-pane h2 { font-size: 12.5px; margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid #F0F2F5; }
+.mt-pane h3 { font-size: 12px; margin: 10px 0 4px; color: #5A6478; }
+.mt-pane p { margin: 0 0 7px; }
+.mt-pane strong { color: var(--text); font-weight: 600; }
+.mt-pane code { background: #F1F4F8; padding: 1px 4px; border-radius: 4px; font-size: 10.5px; }
+.mt-pane ul { margin: 0 0 8px; padding-left: 18px; }
+.mt-pane li { margin: 2px 0; }
+.mt-pane blockquote {
+  margin: 0 0 9px; padding: 5px 10px; background: #F7F8FA;
+  border-left: 2px solid #D8DDE5; border-radius: 0 5px 5px 0; color: var(--text2); font-size: 11px;
+}
+.mt-pane hr { border: none; border-top: 1px solid #F0F2F5; margin: 10px 0; }
+.mt-pane table { border-collapse: collapse; width: 100%; margin: 4px 0 10px; font-size: 11px; }
+.mt-pane th, .mt-pane td { border: 1px solid #E7E9EE; padding: 5px 8px; text-align: left; vertical-align: top; }
+.mt-pane th { background: #F7F8FA; font-weight: 600; color: #4A5364; }
+
+/* 原文逐句 */
+.raw-line { display: flex; gap: 9px; padding: 4px 0; border-bottom: 1px solid #F5F6F9; }
+.raw-line:last-child { border-bottom: none; }
+.raw-line .rt {
+  flex: 0 0 34px; font-size: 10px; color: #B4BBC5;
+  padding-top: 2px; font-variant-numeric: tabular-nums;
+}
+.raw-line .rc { flex: 1; font-size: 12px; line-height: 1.65; color: #2A303A; }
+

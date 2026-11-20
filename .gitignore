@@ -11,6 +11,7 @@ models/
 # 本地数据：录音记录、报告、日志、配置（配置里含 API Key）
 data/sessions/
 data/reports/
+data/meetings/
 data/logs/
 data/settings.json
 data/_*
