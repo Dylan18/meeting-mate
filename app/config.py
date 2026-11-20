@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ DEFAULTS: dict[str, Any] = {
     # 语音识别
     "asr_model": "sensevoice",      # sensevoice / paraformer-small
     "asr_language": "auto",         # auto / zh / en
-    
+
     # 大模型
     "llm": {
         "base_url": "https://api.deepseek.com/v1",
@@ -42,9 +43,26 @@ DEFAULTS: dict[str, Any] = {
     "daily_report_enabled": True,
     # 界面
     "always_on_top": False,
-    "start_minimized": False,
-    "close_to_tray": True,
 }
+
+
+def parse_hhmm(value: Any) -> str | None:
+    """把用户填的时间规范化成 HH:MM，非法返回 None。
+
+    以前的调度器直接拿字符串比大小：填 "9:00" 时 "09:31" < "9:00" 恒成立，日报永远不生成，
+    且界面没有任何提示。校验必须放在保存入口。
+    """
+    s = str(value or "").strip().replace("：", ":")
+    if not s:
+        return None
+    try:
+        t = datetime.strptime(s, "%H:%M")
+    except ValueError:
+        try:
+            t = datetime.strptime(s, "%H:%M:%S")
+        except ValueError:
+            return None
+    return t.strftime("%H:%M")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -70,6 +88,11 @@ class Config:
                     raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
                     self._data = _deep_merge(DEFAULTS, raw)
                 except Exception:
+                    # 损坏时把原文件留一份 .bad，别让用户的 API Key 无声消失
+                    try:
+                        CONFIG_PATH.replace(CONFIG_PATH.with_suffix(".bad"))
+                    except Exception:
+                        pass
                     self._data = copy.deepcopy(DEFAULTS)
             else:
                 self.save()

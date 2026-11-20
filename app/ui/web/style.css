@@ -86,12 +86,27 @@ main {
 .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(18,161,80,.14); animation: pulse 2.4s infinite; }
 .dot.meeting { background: var(--danger); box-shadow: 0 0 0 3px rgba(229,72,77,.14); animation: pulse 1.6s infinite; }
 .dot.busy { background: var(--warn); box-shadow: 0 0 0 3px rgba(232,163,61,.16); }
+.dot.err { background: var(--danger); box-shadow: 0 0 0 3px rgba(229,72,77,.16); }
 @keyframes pulse {
   0%,100% { opacity: 1; }
   50% { opacity: .45; }
 }
 .status-text { font-size: 13px; font-weight: 600; flex: 1; }
 .clock { font-size: 11.5px; color: var(--text3); font-variant-numeric: tabular-nums; }
+
+/* 音频降级提示：麦克风被拔掉时必须看得见，不能只靠状态点变红 */
+.audio-warn {
+  display: none;
+  margin: -2px 0 9px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  background: rgba(229,72,77,.08);
+  border: 1px solid rgba(229,72,77,.22);
+  color: #B4292E;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.audio-warn.show { display: block; }
 
 .meter-row { display: flex; align-items: center; gap: 9px; margin-top: 7px; }
 .mlabel { font-size: 10.5px; color: var(--text3); width: 34px; flex: 0 0 34px; }
@@ -261,6 +276,14 @@ main {
   min-width: 0;
 }
 .field input:focus, .field select:focus { border-color: var(--accent); background: #fff; }
+.key-row { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.key-row input { flex: 1; min-width: 0; }
+.key-eye {
+  flex: 0 0 auto; height: 31px; padding: 0 9px;
+  border: 1px solid #E3E6EB; border-radius: 8px;
+  background: #F9FAFB; color: var(--text3); font-size: 11px;
+}
+.key-eye:hover { background: #EEF2F7; color: var(--text2); }
 .hint { font-size: 10.5px; color: #A8B0BC; line-height: 1.55; margin: 9px 0 0; }
 
 .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }

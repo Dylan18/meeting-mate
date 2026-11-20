@@ -20,6 +20,15 @@ WIDTH, HEIGHT = 468, 712
 _DEBUG = "--debug" in sys.argv
 
 
+def _rotate(path: Path, max_bytes: int = 5 * 1024 * 1024) -> None:
+    """简单轮转：给 fd 重定向用的日志没法挂 Handler，只能开文件前手动挪一次。"""
+    try:
+        if path.exists() and path.stat().st_size > max_bytes:
+            path.replace(path.with_suffix(path.suffix + ".1"))
+    except Exception:
+        pass
+
+
 def _ensure_stdio() -> None:
     """pythonw.exe 启动时没有控制台，stdout/stderr 是 None。
 
@@ -31,9 +40,11 @@ def _ensure_stdio() -> None:
         log.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
         return
+    _rotate(log)
     for fd, name in ((1, "stdout"), (2, "stderr")):
         try:
-            f = open(log, "a", encoding="utf-8", buffering=1)
+            # 故意不关：这个句柄要活到进程结束，接管的正是 fd 1/2
+            f = open(log, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
             os.dup2(f.fileno(), fd)
             stream = getattr(sys, name)
             if stream is None:
@@ -54,12 +65,25 @@ def _enable_dpi() -> None:
             pass
 
 
-def _screen_size() -> tuple[int, int]:
+def _screen_rect() -> tuple[int, int, int, int]:
+    """返回虚拟桌面矩形 (x, y, w, h)，多屏时覆盖所有显示器。"""
     try:
         u = ctypes.windll.user32
-        return u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+        return (u.GetSystemMetrics(76), u.GetSystemMetrics(77),
+                u.GetSystemMetrics(78), u.GetSystemMetrics(79))
     except Exception:
-        return 1920, 1080
+        return 0, 0, 1920, 1080
+
+
+def _clamp_pos(x: int, y: int) -> tuple[int, int]:
+    """拔掉副屏后，上次保存的坐标可能落在屏幕外，用户只能删配置自救。
+
+    这里保证窗口至少有一小块（标题栏区域）落在虚拟桌面内，能拖得回来。
+    """
+    vx, vy, vw, vh = _screen_rect()
+    x = max(vx - WIDTH + 120, min(x, vx + vw - 120))
+    y = max(vy, min(y, vy + vh - 80))
+    return x, y
 
 
 def main() -> None:
@@ -67,19 +91,21 @@ def main() -> None:
     _enable_dpi()
     import webview
 
+    from app.log import install_hooks
     from app.ui.bridge import Bridge
 
+    install_hooks()
     bridge = Bridge()
-    sw, sh = _screen_size()
-    x = max(0, sw - WIDTH - 80)
-    y = max(0, (sh - HEIGHT) // 2 - 20)
+    vx, vy, vw, vh = _screen_rect()
+    x = max(0, vx + vw - WIDTH - 80)
+    y = max(0, vy + (vh - HEIGHT) // 2 - 20)
 
     from app.config import config
 
     saved_pos = config.get("window_pos")
     if isinstance(saved_pos, (list, tuple)) and len(saved_pos) == 2:
         try:
-            x, y = int(saved_pos[0]), int(saved_pos[1])
+            x, y = _clamp_pos(int(saved_pos[0]), int(saved_pos[1]))
         except Exception:
             pass
 
@@ -120,7 +146,7 @@ def main() -> None:
         except Exception:
             pass
 
-    webview.start(debug=True if _DEBUG else False)
+    webview.start(debug=bool(_DEBUG))
 
 
 def bridge_state_top() -> bool:
@@ -135,11 +161,15 @@ _MUTEX_HANDLE: list = []
 
 
 def _already_running() -> bool:
-    """命名互斥体保证只跑一个实例，避免重复双击录出两份文件。"""
+    """命名互斥体保证只跑一个实例，避免重复双击录出两份文件。
+
+    注意 use_last_error=True：ctypes 在两次调用之间可能重置线程的 last error，
+    直接 `windll.kernel32` + `GetLastError()` 会偶发拿到 0，判成"没在运行"。
+    """
     try:
-        k32 = ctypes.windll.kernel32
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         h = k32.CreateMutexW(None, False, "meeting-mate-single-instance")
-        if k32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
             ctypes.windll.user32.MessageBoxW(
                 None, "meeting-mate 已经在运行了。\n\n看下屏幕右侧的小窗口。",
                 "桌面助理 · 已在运行", 0x40,

@@ -71,16 +71,8 @@
     lastText = rec.text || "";
   }
 
-  function showEmpty() {
-    const feed = $("feed");
-    feed.innerHTML = "";
-    const box = el("div", "empty");
-    box.id = "empty";
-    box.appendChild(el("div", "empty-ico")).innerHTML = '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#CBD2DB" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/><path d="M9 21h6"/></svg>';
-    box.appendChild(el("div", "empty-t1", "还没有记录"));
-    box.appendChild(el("div", "empty-t2", "点击「开始监听」，识别到的内容会实时出现在这里"));
-    feed.appendChild(box);
-  }
+  // 空状态由 index.html 里的静态 #empty 承担，不需要 JS 再造一份
+
 
   // ---------------------------------------------------------------- 状态渲染
   function applyState(s) {
@@ -89,8 +81,12 @@
     // 状态点与文案
     const dot = $("dot");
     const st = $("statusText");
+    const audio = s.audio || { ok: true, msg: "" };
     dot.className = "dot";
-    if (s.busy) {
+    if (audio.ok === false) {
+      dot.classList.add("err");
+      st.textContent = "录音异常";
+    } else if (s.busy) {
       dot.classList.add("busy");
       st.textContent = s.busy;
     } else if (s.meeting) {
@@ -102,6 +98,18 @@
     } else {
       dot.classList.add("idle");
       st.textContent = "未开始";
+    }
+
+    // 音频降级提示：绿点但没录到是最坏的情况，必须显式说明
+    const warn = $("audioWarn");
+    if (warn) {
+      if (audio.ok === false && audio.msg) {
+        warn.textContent = audio.msg;
+        warn.classList.add("show");
+      } else {
+        warn.textContent = "";
+        warn.classList.remove("show");
+      }
     }
 
     // 按钮
@@ -164,6 +172,12 @@
       case "asr_status":
         if (d && d.status === "error") toast(d.text, "err");
         break;
+      case "audio_state":
+        if (d && d.ok === false) toast(d.msg || "录音异常", "err");
+        break;
+      case "daily_failed":
+        toast("日报生成失败，已暂停自动重试（30 分钟后重试）", "err");
+        break;
       case "notice":
         toast(String(d || ""));
         break;
@@ -212,6 +226,7 @@
       try {
         const r = await api.poll(seq);
         if (r) {
+          if (r.gap) toast("部分较早的记录已滚出内存缓存（磁盘上的记录仍在）");
           seq = r.seq;
           (r.events || []).forEach(handleEvent);
           applyState(r.state);
@@ -251,36 +266,46 @@
   // ---------------------------------------------------------------- 设置
   async function openSettings() {
     const api = py(); if (!api) return;
-    const s = await api.get_settings();
-    const dev = await api.get_devices();
+    try {
+      const s = await api.get_settings();
+      const dev = await api.get_devices();
 
-    $("cbMic").checked = !!s.mic_enabled;
-    $("cbSys").checked = !!s.system_audio;
-    $("selModel").value = s.asr_model || "sensevoice";
-    $("selLang").value = s.asr_language || "auto";
-    $("cbDaily").checked = !!s.daily_report_enabled;
-    $("inTime").value = s.daily_report_time || "18:30";
-    $("cbTop").checked = !!s.always_on_top;
+      $("cbMic").checked = !!s.mic_enabled;
+      $("cbSys").checked = !!s.system_audio;
+      $("selModel").value = s.asr_model || "sensevoice";
+      $("selLang").value = s.asr_language || "auto";
+      $("cbDaily").checked = !!s.daily_report_enabled;
+      $("inTime").value = s.daily_report_time || "18:30";
+      $("cbTop").checked = !!s.always_on_top;
 
-    const sel = $("selMic");
-    sel.innerHTML = "";
-    sel.appendChild(new Option("自动选择", ""));
-    (dev.mic || []).forEach((d) => sel.appendChild(new Option(d.name, d.id)));
-    sel.value = s.mic_device_id || "";
+      const sel = $("selMic");
+      sel.innerHTML = "";
+      sel.appendChild(new Option("自动选择", ""));
+      (dev.mic || []).forEach((d) => sel.appendChild(new Option(d.name, d.id)));
+      sel.value = s.mic_device_id || "";
 
-    const llm = s.llm || {};
-    $("inBase").value = llm.base_url || "";
-    $("inKey").value = llm.api_key || "";
-    $("inModel").value = llm.model || "";
-    $("testMsg").textContent = "";
+      const llm = s.llm || {};
+      $("inBase").value = llm.base_url || "";
+      $("inKey").value = llm.api_key || "";
+      $("inModel").value = llm.model || "";
+      $("testMsg").textContent = "";
 
-    openSheet("sheetSettings");
+      openSheet("sheetSettings");
+    } catch (e) {
+      report("openSettings: " + (e && e.message));
+      toast("打开设置失败：" + (e && e.message), "err");
+    }
   }
 
   async function saveSettings() {
     const api = py(); if (!api) return;
     if (!$("cbMic").checked && !$("cbSys").checked) {
       toast("至少要启用一个音源", "err");
+      return;
+    }
+    const timeVal = $("inTime").value.trim();
+    if (timeVal && !/^([01]?\d|2[0-3]):[0-5]\d$/.test(timeVal)) {
+      toast("时间请按 18:30 这样填写", "err");
       return;
     }
     const patch = {
@@ -290,7 +315,7 @@
       asr_model: $("selModel").value,
       asr_language: $("selLang").value,
       daily_report_enabled: $("cbDaily").checked,
-      daily_report_time: $("inTime").value.trim() || "18:30",
+      daily_report_time: timeVal || "18:30",
       always_on_top: $("cbTop").checked,
       llm: {
         base_url: $("inBase").value.trim(),
@@ -298,10 +323,19 @@
         model: $("inModel").value.trim(),
       },
     };
-    const r = await api.save_settings(patch);
-    if (r && r.state) applyState(r.state);
-    closeSheet("sheetSettings");
-    toast("设置已保存", "ok");
+    try {
+      const r = await api.save_settings(patch);
+      if (r && r.state) applyState(r.state);
+      if (r && r.ok === false) {
+        toast(r.msg || "保存失败", "err");
+        return;
+      }
+      closeSheet("sheetSettings");
+      toast((r && r.msg) || "设置已保存", "ok");
+    } catch (e) {
+      report("saveSettings: " + (e && e.message));
+      toast("保存失败：" + (e && e.message), "err");
+    }
   }
 
   async function testLLM() {
@@ -387,32 +421,42 @@
 
   // ---------------------------------------------------------------- 历史
   async function openHistory() {
-    await loadHistory();
-    openSheet("sheetHistory");
+    try {
+      await loadHistory();
+      openSheet("sheetHistory");
+    } catch (e) {
+      report("openHistory: " + (e && e.message));
+      toast("打开历史记录失败：" + (e && e.message), "err");
+    }
   }
 
   async function loadHistory() {
     const api = py(); if (!api) return;
-    histItems = (await api.list_reports()) || [];
-    const list = $("histList");
-    list.innerHTML = "";
-    if (!histItems.length) {
-      list.appendChild(el("div", "hist-empty", "还没有生成过记录"));
-      return;
-    }
-    histItems.forEach((it, i) => {
-      const row = el("div", "hist-item" + (histSelected === it.path ? " active" : ""));
-      row.dataset.path = it.path;
-      const top = el("div", "hi-top");
-      top.appendChild(el("span", "badge " + it.kind, it.kind === "meeting" ? "会议" : "日报"));
-      top.appendChild(el("span", "hi-title", String(it.name).replace(/^(日报|会议)_/, "")));
-      row.appendChild(top);
-      row.appendChild(el("span", "hi-time", it.mtime));
-      row.addEventListener("click", () => selectReport(it.path, row));
-      list.appendChild(row);
-    });
-    if (!histSelected && histItems.length) {
-      selectReport(histItems[0].path, list.firstChild);
+    try {
+      histItems = (await api.list_reports()) || [];
+      const list = $("histList");
+      list.innerHTML = "";
+      if (!histItems.length) {
+        list.appendChild(el("div", "hist-empty", "还没有生成过记录"));
+        return;
+      }
+      histItems.forEach((it) => {
+        const row = el("div", "hist-item" + (histSelected === it.path ? " active" : ""));
+        row.dataset.path = it.path;
+        const top = el("div", "hi-top");
+        top.appendChild(el("span", "badge " + it.kind, it.kind === "meeting" ? "会议" : "日报"));
+        top.appendChild(el("span", "hi-title", String(it.name).replace(/^(日报|会议)_/, "")));
+        row.appendChild(top);
+        row.appendChild(el("span", "hi-time", it.mtime));
+        row.addEventListener("click", () => selectReport(it.path, row));
+        list.appendChild(row);
+      });
+      if (!histSelected && histItems.length) {
+        selectReport(histItems[0].path, list.firstChild);
+      }
+    } catch (e) {
+      report("loadHistory: " + (e && e.message));
+      toast("读取记录列表失败：" + (e && e.message), "err");
     }
   }
 
@@ -421,12 +465,17 @@
     histSelected = path;
     document.querySelectorAll(".hist-item").forEach((n) => n.classList.remove("active"));
     if (row) row.classList.add("active");
-    const r = await api.read_report(path);
     const pv = $("histPreview");
-    if (r.ok) {
-      pv.innerHTML = mdToHtml(r.text);
-    } else {
-      pv.innerHTML = `<div class="hist-empty">${escHtml(r.text || "读取失败")}</div>`;
+    try {
+      const r = await api.read_report(path);
+      if (r.ok) {
+        pv.innerHTML = mdToHtml(r.text);
+      } else {
+        pv.innerHTML = `<div class="hist-empty">${escHtml(r.text || "读取失败")}</div>`;
+      }
+    } catch (e) {
+      report("selectReport: " + (e && e.message));
+      pv.innerHTML = `<div class="hist-empty">读取失败：${escHtml(e && e.message)}</div>`;
     }
     pv.scrollTop = 0;
   }
@@ -453,6 +502,8 @@
     });
     window.addEventListener("mousemove", (e) => {
       if (!drag) return;
+      // 鼠标移出窗口后松开，mouseup 收不到，拖拽会一直粘着 —— 用按键状态兜底
+      if (e.buttons === 0) { drag = null; return; }
       const now = performance.now();
       if (now - drag.last < 26) return;
       drag.last = now;
@@ -493,6 +544,12 @@
 
     $("btnSave").addEventListener("click", saveSettings);
     $("btnTest").addEventListener("click", testLLM);
+    $("btnEye").addEventListener("click", () => {
+      const k = $("inKey");
+      const hidden = k.type === "password";
+      k.type = hidden ? "text" : "password";
+      $("btnEye").textContent = hidden ? "隐藏" : "显示";
+    });
     $("btnOpenDir").addEventListener("click", () => { const a = py(); if (a) a.open_reports_dir(); });
     $("btnOpenFile").addEventListener("click", () => {
       if (histSelected) openPath(histSelected);

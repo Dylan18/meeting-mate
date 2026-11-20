@@ -5,14 +5,13 @@
 """
 from __future__ import annotations
 
-import os
 import shutil
 import tarfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .config import MODEL_DIR
 
@@ -67,11 +66,13 @@ def _download(url: str, dest: Path, progress: Progress | None, label: str) -> No
     if existing > 0:
         req.add_header("Range", f"bytes={existing}-")
     with urllib.request.urlopen(req, timeout=40) as r:
-        total = int(r.headers.get("Content-Length") or 0) + existing
-        mode = "ab" if existing and r.status == 206 else "wb"
-        if mode == "wb":
-            existing = 0
-        done = existing
+        status = getattr(r, "status", 200)
+        # 服务器不认 Range 时会直接返回 200 + 完整文件：此时必须重算 total，
+        # 否则进度会从"已有大小"开始累加，最终超过 100%
+        resuming = existing > 0 and status == 206
+        mode = "ab" if resuming else "wb"
+        done = existing if resuming else 0
+        total = int(r.headers.get("Content-Length") or 0) + done
         last = 0.0
         with tmp.open(mode) as f:
             while True:
@@ -95,6 +96,13 @@ def _download(url: str, dest: Path, progress: Progress | None, label: str) -> No
     tmp.replace(dest)
 
 
+def _unlink_quiet(p: Path) -> None:
+    try:
+        p.unlink()
+    except Exception:
+        pass
+
+
 def _extract_and_trim(archive: Path, target_dir: Path, keep: list[str],
                       progress: Progress | None) -> None:
     if progress:
@@ -104,7 +112,11 @@ def _extract_and_trim(archive: Path, target_dir: Path, keep: list[str],
         shutil.rmtree(tmp_dir, ignore_errors=True)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "r:bz2") as tf:
-        tf.extractall(tmp_dir)
+        # 3.12+ 支持 filter="data"，能挡住 ../ 路径穿越与设备文件；低版本只能裸解压
+        try:
+            tf.extractall(tmp_dir, filter="data")
+        except TypeError:
+            tf.extractall(tmp_dir)
 
     # 找到包内的模型目录
     src = None
@@ -113,6 +125,7 @@ def _extract_and_trim(archive: Path, target_dir: Path, keep: list[str],
             src = p
             break
     if src is None:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         raise RuntimeError("压缩包结构异常")
 
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -122,10 +135,7 @@ def _extract_and_trim(archive: Path, target_dir: Path, keep: list[str],
             shutil.move(str(s), str(target_dir / f))
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    try:
-        archive.unlink()
-    except Exception:
-        pass
+    _unlink_quiet(archive)
 
 
 def ensure_model(name: str, progress: Progress | None = None, force: bool = False) -> Path:
@@ -147,7 +157,13 @@ def ensure_model(name: str, progress: Progress | None = None, force: bool = Fals
                     progress(f"下载{title}（约 {e['approx_mb']}MB，仅首次）…")
                 _download(base + e["archive"], archive, progress,
                           f" {title}（约 {e['approx_mb']}MB）")
-            _extract_and_trim(archive, d, e["keep"], progress)
+            try:
+                _extract_and_trim(archive, d, e["keep"], progress)
+            except Exception:
+                # 断网截断的 .part 会留下一个"看起来已下载"的坏包，之后三个镜像全解压失败，
+                # 用户只能手动删目录。这里删掉，让下一轮重新下。
+                _unlink_quiet(archive)
+                raise
             if is_ready(name):
                 if progress:
                     progress("模型准备完成")
@@ -157,10 +173,3 @@ def ensure_model(name: str, progress: Progress | None = None, force: bool = Fals
             last_err = ex
             continue
     raise RuntimeError(f"模型下载失败：{last_err}")
-
-
-def disk_free_gb() -> float:
-    try:
-        return shutil.disk_usage(str(MODEL_DIR)).free / 1073741824
-    except Exception:
-        return 0.0
