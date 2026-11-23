@@ -84,3 +84,96 @@ def test_quiet_room_keeps_sensitivity():
     audio = np.concatenate([_noise(3, 0.005), _speech(1.5), _noise(3, 0.005)])
     segs, _ = _run(_blocks(audio))
     assert len(segs) == 1
+
+
+# ---------------------------------------------------------------- 噪声底自锁回归
+# 现场故障：下午空调开大，噪声底被顶到 0.05，判定阈值 0.13，采集线程还在跑、
+# 电平条还在跳，但一整天一个片段都不出，界面也没有任何报错。
+def _noise_blocks(sec: float, rms: float, seed: int = 5) -> list[np.ndarray]:
+    return _blocks(_noise(sec, rms, seed=seed))
+
+
+def _voice(sec: float, rms: float, seed: int = 1) -> np.ndarray:
+    """按指定 RMS 归一化后的"人声"（保留音节起伏）。"""
+    x = _speech(sec, seed=seed)
+    return (x / float(np.sqrt(np.mean(x ** 2))) * rms).astype(np.float32)
+
+
+def test_noisy_room_still_detects_speech():
+    """底噪 0.03（空调开大）+ 正常说话 0.06，必须还能切出片段。"""
+    parts = []
+    for i in range(5):
+        parts.append(_noise(20, 0.03, seed=i))
+        parts.append(_voice(3, 0.06, seed=20 + i))
+    segs, seg = _run(_blocks(np.concatenate(parts).astype(np.float32)))
+    assert len(segs) >= 4
+    assert seg.noise_floor > 0.02          # 底噪跟到了环境水平
+    assert seg.current_threshold <= 0.05   # 但阈值有上限，不能把说话挡住
+
+
+def test_quiet_then_noisy_does_not_lock_out():
+    """先安静 20s 再变吵（底噪 0.04）：噪声底可以跟着抬，但不能抬到听不见人声。"""
+    parts = [_noise(20, 0.006)]
+    for i in range(5):
+        parts.append(_noise(20, 0.04, seed=30 + i))
+        parts.append(_voice(3, 0.07, seed=40 + i))
+    segs, seg = _run(_blocks(np.concatenate(parts).astype(np.float32)))
+    assert len(segs) >= 3
+    assert seg.current_threshold <= 0.051
+
+
+def test_low_gain_speech_detected():
+    """麦克风增益偏低（说话只有 0.015，底噪 0.008）也要能识别。"""
+    parts = []
+    for i in range(5):
+        parts.append(_noise(20, 0.008, seed=50 + i))
+        parts.append(_voice(3, 0.015, seed=60 + i))
+    segs, _ = _run(_blocks(np.concatenate(parts).astype(np.float32)))
+    assert len(segs) >= 3
+
+
+def test_threshold_has_absolute_ceiling():
+    """再吵的环境，阈值也不能超过 0.05（否则正常说话的 0.06 就被判成静音）。"""
+    seg = VADSegmenter(lambda a: None)
+    seg.noise_floor = 0.2
+    assert seg.current_threshold <= 0.0501
+
+
+def test_stats_exposes_progress_for_watchdog():
+    audio = np.concatenate([np.zeros(16000 * 2, np.float32), _speech(1.5),
+                            np.zeros(16000 * 2, np.float32)])
+    segs, seg = _run(_blocks(audio))
+    st = seg.stats()
+    assert len(segs) == 1
+    assert st["segments"] == 1
+    assert st["since_segment"] >= 0
+    assert st["threshold"] >= 0.006
+
+
+def test_long_run_never_goes_deaf():
+    """长时间运行的回归：安静 → 变吵 → 又变安静，每个阶段都必须还能出片段。
+
+    这是本次现场故障的完整复现路径：早上安静能用，下午环境变吵，此后一整天
+    零片段。噪声底只升不降的那种实现过不了这条。
+    """
+    rng = np.random.default_rng(99)
+    phases = [("安静", 0.005, 8), ("变吵", 0.035, 8), ("又安静", 0.004, 8)]
+    out: list[float] = []
+    seg = VADSegmenter(lambda a: out.append(len(a) / 16000))
+    per_phase: list[int] = []
+
+    for name, bg, bursts in phases:
+        before = len(out)
+        for i in range(bursts):
+            noise = rng.normal(0, bg, size=16000 * 12).astype(np.float32)
+            voice = _voice(3, max(0.06, bg * 2.0), seed=200 + i)
+            gap = rng.normal(0, bg, size=16000 * 3).astype(np.float32)
+            sig = np.concatenate([noise, voice, gap])
+            for b in _blocks(sig):
+                seg.feed(b)
+        per_phase.append(len(out) - before)
+        print(f"  {name}: 底噪 {seg.noise_floor:.4f} 阈值 {seg.current_threshold:.4f} "
+              f"片段 {per_phase[-1]}")
+
+    assert all(n >= 5 for n in per_phase), f"某个阶段完全没片段: {per_phase}"
+    assert seg.current_threshold <= 0.0501

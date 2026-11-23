@@ -107,10 +107,13 @@
     if (warn) {
       if (audio.ok === false && audio.msg) {
         warn.textContent = audio.msg;
-        warn.classList.add("show");
+        warn.className = "audio-warn show";
+      } else if (audio.hint) {
+        warn.textContent = audio.hint;
+        warn.className = "audio-warn show warn";
       } else {
         warn.textContent = "";
-        warn.classList.remove("show");
+        warn.className = "audio-warn";
       }
     }
 
@@ -123,8 +126,10 @@
     bm.textContent = s.meeting ? "结束会议" : "开始会议";
     bm.className = "btn " + (s.meeting ? "danger" : "outline-danger");
 
+    // 监听按钮不跟着 busy 禁用：生成日报/纪要跟采集互不影响，
+    // 之前禁用会把这个点击静默吞掉，用户以为"点了没反应"
     const lock = !!s.busy;
-    bl.disabled = lock;
+    bl.disabled = false;
     bm.disabled = lock;
     $("btnDaily").disabled = lock;
 
@@ -179,6 +184,10 @@
         break;
       case "daily_failed":
         toast("日报生成失败，已暂停自动重试（30 分钟后重试）", "err");
+        break;
+      case "hint":
+        // 条状提示由 applyState 渲染；这里只把新出现的提示轻推一下
+        if (d) toast(String(d));
         break;
       case "notice":
         toast(String(d || ""));

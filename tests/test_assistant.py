@@ -22,9 +22,9 @@ def test_job_lock_is_atomic(asst):
     """P0-2：第二次占位必须失败，不能出现两个并发的 LLM 任务。"""
     assert asst._try_begin("任务一") is True
     assert asst._try_begin("任务二") is False
-    assert asst.busy is True
+    assert asst.busy
     asst._end_job()
-    assert asst.busy is False
+    assert not asst.busy
     assert asst._try_begin("任务三") is True
     asst._end_job()
 

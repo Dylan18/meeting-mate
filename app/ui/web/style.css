@@ -107,6 +107,12 @@ main {
   line-height: 1.45;
 }
 .audio-warn.show { display: block; }
+/* 提示级（噪声大 / 没找到麦克风）：不是故障，但必须让用户看见，不然就是"静默失效" */
+.audio-warn.warn {
+  background: rgba(232,163,61,.10);
+  border-color: rgba(232,163,61,.30);
+  color: #8A5A12;
+}
 
 .meter-row { display: flex; align-items: center; gap: 9px; margin-top: 7px; }
 .mlabel { font-size: 10.5px; color: var(--text3); width: 34px; flex: 0 0 34px; }

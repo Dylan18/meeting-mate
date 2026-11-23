@@ -162,8 +162,10 @@ class Bridge:
                     "text": self._asst.transcriber.status_text,
                     "ready": self._asst.transcriber.ready},
             "audio": {"ok": not self._asst.audio_error,
-                      "msg": self._asst.audio_error or ""},
-            "busy": self._asst.busy,
+                      "msg": self._asst.audio_error or "",
+                      "hint": self._asst.audio_hint or ""},
+            "busy": self._asst.busy if isinstance(self._asst.busy, str) else (
+                "处理中…" if self._asst.busy else ""),
             "count": self.count_today,
             "llm_ready": config.llm_ready(),
             "model": config.get("asr_model", "sensevoice"),

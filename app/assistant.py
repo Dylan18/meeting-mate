@@ -45,16 +45,26 @@ class Assistant:
         self.meeting: dict | None = None
         # 按天存，避免进程连跑两天时第二天的日报串进前一天的会议标题
         self.meeting_titles: dict[str, list[str]] = {}
-        self.busy = False
+        self.busy: str = ""      # 空串=空闲；否则是给界面显示的任务名
         self.audio_error: str | None = None
+        # 运行期"能听到声音但不出内容"的提示（噪声过大 / 设备静音），供界面显示
+        self.audio_hint: str | None = None
+        self._hint_at = 0.0
+        self._hint_text = ""
+        self._last_restart = 0.0
+        self._last_health_log = 0.0
+        self._job_guard = threading.Lock()
+        self._job_held = False
         self._job_lock = threading.Lock()
         self._store_error_reported = False
+        threading.Thread(target=self._watch_audio, daemon=True, name="audio-watch").start()
 
     # ------------------------------------------------------------ 转写回调
     def _on_asr_status(self, status: str, text: str) -> None:
         _emit(self.on_event, "asr_status", {"status": status, "text": text})
 
     def _on_text(self, rec: dict) -> None:
+        self._clear_hint()
         try:
             store.append_segment(rec)
             self._store_error_reported = False
@@ -93,28 +103,143 @@ class Assistant:
         )
         _emit(self.on_event, "heard", dur)
 
+    # ------------------------------------------------------------ 音频看门狗
+    def _hint(self, msg: str) -> None:
+        """把"在跑但没产出"的原因摆到界面上；同一句话 3 分钟内不重复提示。"""
+        now = time.monotonic()
+        if msg == self._hint_text and now - self._hint_at < 180:
+            return
+        self._hint_text = msg
+        self._hint_at = now
+        self.audio_hint = msg
+        _emit(self.on_event, "hint", msg)
+
+    def _clear_hint(self) -> None:
+        if self.audio_hint:
+            self.audio_hint = None
+            self._hint_text = ""
+            _emit(self.on_event, "hint", "")
+
+    def _watch_audio(self) -> None:
+        """每 5 秒体检一次。
+
+        这些检查存在的理由：出问题的时候界面看起来一切正常（绿点、电平在跳），
+        但一个片段都不出。用户唯一能感知到的就是"麦克风坏了"。与其让人猜，
+        不如自己发现、自己重启，或者至少说清楚原因。
+        """
+        while True:
+            time.sleep(5)
+            try:
+                self._check_audio()
+                self._log_health()
+            except Exception as e:
+                log_exc("assistant 音频看门狗异常", e)
+
+    def _log_health(self) -> None:
+        """每分钟往 error.log 写一行音频状态。
+
+        这条日志是给"昨天还好、今天没记录"这类问题用的：有底噪、阈值、片段数、
+        心跳，一眼就能看出是设备没声音、还是 VAD 把说话挡住了。
+        """
+        if not self.listening:
+            return
+        now = time.monotonic()
+        if now - self._last_health_log < 60:
+            return
+        self._last_health_log = now
+        h = self.hub.health()
+        v = h["vad"]
+        _log.info(
+            "音频状态 mic=%.4f sys=%.4f 底噪=%.4f 阈值=%.4f 片段=%d 静默=%.0fs 心跳=%d 设备=%s",
+            h["mic_level"], h["sys_level"], v["floor"], v["threshold"],
+            v["segments"], v["since_segment"], h["tick"], h["captured"],
+        )
+
+    def _check_audio(self) -> None:
+        if not self.listening:
+            return
+        h = self.hub.health()
+        if not h["running"]:
+            return
+        vad = h["vad"]
+        now = time.monotonic()
+
+        # 1) 混音线程卡死：心跳不动就自愈重启（最多每分钟一次，避免抖动循环）
+        if h["tick_age"] > 5:
+            if now - self._last_restart > 60:
+                self._last_restart = now
+                log_exc("音频看门狗：混音线程 5 秒无心跳，自动重启采集",
+                        f"{h}", level=30)
+                self.stop_listening()
+                self.start_listening()
+                # 提示要放在重启之后：stop/start 会清空 hint
+                self._hint("录音线程没有响应，已自动重启采集")
+            return
+
+        # 2) 两路电平长时间全零：设备静音 / 被独占 / 选错设备
+        if h["uptime"] > 45 and h["mic_level"] < 1e-6 and h["sys_level"] < 1e-6:
+            self._hint("麦克风没有声音：可能被静音、被其他程序独占，或选错了输入设备")
+            return
+
+        # 3) 有声音但一直不出片段（噪声底把说话挡住了，或模型卡住）
+        if h["uptime"] > 200 and vad["peak_60s"] > vad["threshold"] * 1.2:
+            since = vad["since_segment"]
+            if since < 0:
+                since = h["uptime"]
+            if since > 150:
+                self.hub.segmenter.recalibrate()
+                log_exc("音频看门狗：长时间无片段，重算噪声底",
+                        f"since={since:.0f}s {vad}", level=30)
+                self._hint(
+                    f"已经 {int(since // 60)} 分钟没有识别到内容：环境噪声偏大"
+                    f"（噪声底 {vad['floor']:.3f}）或麦克风音量太小。"
+                    "可以戴耳机、调高麦克风增益，或换一个输入设备")
+                return
+
+        # 4) 环境噪声本身就大到分不出人声，提前说，不要等用户发现没记录
+        if vad["noisy"]:
+            self._hint(
+                f"环境噪声偏大（噪声底 {vad['floor']:.3f}），识别可能不准；"
+                "建议戴耳机或调高麦克风音量")
+
     # ------------------------------------------------------------ 任务锁
+    def _hold(self) -> None:
+        with self._job_guard:
+            self._job_held = True
+
     def _try_begin(self, label: str) -> bool:
         if not self._job_lock.acquire(blocking=False):
             return False
-        self.busy = True
+        self._hold()
+        self.busy = label
         _emit(self.on_event, "busy", label)
         return True
 
     def _begin_waiting(self, label: str, timeout: float = 240.0) -> bool:
         if not self._job_lock.acquire(timeout=timeout):
             return False
-        self.busy = True
+        self._hold()
+        self.busy = label
         _emit(self.on_event, "busy", label)
         return True
 
     def _end_job(self) -> None:
-        self.busy = False
+        """释放作业锁。
+
+        调用线程和 worker 线程不是同一个，Python 的 Lock 也不认"谁持有"，
+        所以必须自己记一笔：否则重复调用会把别人持有的锁放掉（日志里出现过
+        "job lock 不在锁定状态"），两个任务就能同时跑、互相覆盖报告。
+        """
+        self.busy = ""
         _emit(self.on_event, "busy", "")
-        try:
-            self._job_lock.release()
-        except RuntimeError:
-            log_exc("assistant._end_job 重复释放", "job lock 不在锁定状态")
+        with self._job_guard:
+            if not self._job_held:
+                return
+            self._job_held = False
+            try:
+                self._job_lock.release()
+            except RuntimeError:
+                log_exc("assistant._end_job 释放失败", "job lock 不在锁定状态")
 
     # ------------------------------------------------------------ 监听
     def start_listening(self) -> bool:
@@ -132,6 +257,11 @@ class Assistant:
             return False
         self.listening = True
         self.audio_error = self.hub.audio_error
+        self.audio_hint = None
+        self._hint_text = ""
+        # 开了麦克风却没拿到设备：以前是静默地只录系统声音，实测里非常难发现
+        if config.get("mic_enabled", True) and "麦克风" not in self.hub.health()["captured"]:
+            self._hint("没有找到可用的麦克风，现在只录系统声音；请检查输入设备或连接麦克风")
         model = config.get("asr_model", "sensevoice")
         self.transcriber.ensure_model(model)
         if not self.transcriber.ready:
@@ -152,6 +282,7 @@ class Assistant:
             return
         self.hub.stop()
         self.listening = False
+        self._clear_hint()
         _emit(self.on_event, "listening", False)
 
     def toggle_listening(self) -> bool:
