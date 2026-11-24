@@ -96,3 +96,34 @@ def test_read_meeting_returns_transcript_from_sidecar(tmp_path, monkeypatch):
     assert r["title"] == "上线会"
     assert [x["text"] for x in r["transcript"]] == ["第一句", "第二句"]
     assert r["engine"] == "local" and r["note"] == "AI 被拦"
+
+
+def test_auto_listen_starts_capture_on_launch(bridge, monkeypatch):
+    """打开程序就开录：崩溃/睡眠/手动重启后不该停在"未监听"。
+
+    现场教训：早上重启过一次，程序启动后是暂停状态，人以为在录，到晚上导出日报
+    才发现整天没有内容。
+    """
+    from app.ui import bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bridge_mod.config, "get",
+                        lambda k, d=None: True if k == "auto_listen" else d)
+    calls: list[int] = []
+    monkeypatch.setattr(bridge._asst, "start_listening", lambda: calls.append(1))
+
+    bridge._auto_listen()
+    assert calls == [1]
+
+
+def test_auto_listen_respects_switch_off(bridge, monkeypatch):
+    from app.ui import bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bridge_mod.config, "get",
+                        lambda k, d=None: False if k == "auto_listen" else d)
+    calls: list[int] = []
+    monkeypatch.setattr(bridge._asst, "start_listening", lambda: calls.append(1))
+
+    bridge._auto_listen()
+    assert calls == []

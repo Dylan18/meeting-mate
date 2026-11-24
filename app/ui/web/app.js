@@ -289,6 +289,7 @@
       $("cbDaily").checked = !!s.daily_report_enabled;
       $("inTime").value = s.daily_report_time || "18:30";
       $("cbTop").checked = !!s.always_on_top;
+      $("cbAuto").checked = s.auto_listen !== false;
 
       const sel = $("selMic");
       sel.innerHTML = "";
@@ -329,6 +330,7 @@
       daily_report_enabled: $("cbDaily").checked,
       daily_report_time: timeVal || "18:30",
       always_on_top: $("cbTop").checked,
+      auto_listen: $("cbAuto").checked,
       llm: {
         base_url: $("inBase").value.trim(),
         api_key: $("inKey").value.trim(),

@@ -56,6 +56,14 @@ _FLOOR_MAX = 0.08
 _THR_MIN = 0.006
 _THR_MAX = 0.05
 _FLOOR_RATIO = 1.5
+# 校准窗的 15 分位低于这个值，说明这 2 秒整窗是"数字静音"（采集流刚建好还没出数据、
+# 或麦克风带门限），不能当噪声底用 —— 拿它当底噪会把阈值压到最低一档。
+_CALIB_SILENT_P15 = 0.002
+# 校准期间连峰值都低于这个值 → 设备根本没在出数据（预热），这一窗不能当底噪
+_CALIB_SILENT_PEAK = 0.012
+_CALIB_RETRY = 2            # 判定不可信后最多再补两窗（累计 6 秒）
+# 连续几次"被 20 秒上限强切"才认定噪声底被低估
+_FORCED_LEARN_AFTER = 3
 # 环境噪声到这个量级就基本分不出人声了，界面要给出明确提示
 _NOISY_FLOOR = 0.03
 
@@ -227,6 +235,18 @@ def _calibrate(samples: list[float]) -> float:
     return max(_FLOOR_MIN, min(floor, 0.02))
 
 
+def _looks_like_silence(samples: list[float]) -> bool:
+    """校准窗是不是"整窗都没有真实声音"。
+
+    真实现场遇到的坑：点开始监听的那一刻，WASAPI 流刚建好还没真正出数据，前 2 秒
+    麦克风回的是全零；或者麦克风带门限，没人说话时就是数字静音。这两种情况的 15 分位
+    都在 0.0001 附近，用它算出来的噪声底 0.0008 → 阈值被压到 0.006 的绝对下限。
+    之后环境噪声（0.01 上下）全程高于阈值，VAD 永远判"在说话"，找不到 0.7 秒停顿，
+    只能一路顶到 20 秒强制切断 —— 表现出来就是"转写变差了、一句话糊成一长条"。
+    """
+    return _percentile(samples, 0.15) < _CALIB_SILENT_P15
+
+
 class VADSegmenter:
     """按 100ms block 做能量 VAD，输出完整语音片段。
 
@@ -265,6 +285,10 @@ class VADSegmenter:
         self._active = False
         self.noise_floor = 0.002
         self._calib: list[float] = []
+        self._calib_retry = 0
+        self._calib_peak = 0.0                 # 校准期间听到过的最大能量
+        self._pending: list[np.ndarray] = []   # 校准期先存着，定好阈值再回放
+        self._pending_max = int(12000 / BLOCK_MS)   # 最多存 12 秒
         self._rms_hist: list[float] = []
         self._since_check = 0
         self._bg: deque[float] = deque(maxlen=_BG_WINDOW)
@@ -273,6 +297,7 @@ class VADSegmenter:
         self._lock = threading.RLock()
         self.dropped_noise = 0     # 因判定为稳态噪声被丢弃的片段数（测试与诊断用）
         self.segments_out = 0      # 产出的片段数
+        self.forced_flushes = 0    # 连续被 max_len 强切的次数（底噪低估的自证信号）
         self.last_segment_at = 0.0  # 最近一次产出片段的 monotonic 时间
 
     def reset(self) -> None:
@@ -284,11 +309,15 @@ class VADSegmenter:
             self._active = False
             self.noise_floor = 0.002
             self._calib.clear()
+            self._calib_retry = 0
+            self._calib_peak = 0.0
+            self._pending.clear()
             self._rms_hist.clear()
             self._since_check = 0
             self._bg.clear()
             self._since_floor = 0
             self._peak.clear()
+            self.forced_flushes = 0
 
     def recalibrate(self) -> None:
         """外部强制重算噪声底（看门狗发现"有声音但一直不出片段"时调用）。"""
@@ -339,55 +368,80 @@ class VADSegmenter:
             # ---- 启动校准 ----
             if len(self._calib) < self.calib_blocks:
                 self._calib.append(rms)
+                self._pending.append(block)      # 校准期的音频先存着，定好阈值再回放
+                if len(self._pending) > self._pending_max:
+                    self._pending.pop(0)
+                self._calib_peak = max(self._calib_peak, rms)
                 if len(self._calib) == self.calib_blocks:
+                    # 只有"到现在为止一点声音都没听到"才算设备预热，才值得再等一窗。
+                    # 房间安静但有说话/键盘声 → 这些峰就是有效信息，立刻定阈值。
+                    if (self._calib_retry < _CALIB_RETRY
+                            and self._calib_peak < _CALIB_SILENT_PEAK
+                            and _looks_like_silence(self._calib)):
+                        # 整窗是数字静音：设备刚启动/带门限，这一窗不能用来定底噪。
+                        # 清空再收一窗，最多补 _CALIB_RETRY 次；实在都是静音才认账。
+                        self._calib.clear()
+                        self._calib_retry += 1
+                        return
                     self.noise_floor = _calibrate(self._calib)
                     self._bg.extend(self._calib)     # 校准样本直接进背景窗
                     self._refresh_floor()
+                    pending, self._pending = self._pending, []
+                    for b in pending:                # 回放，校准期的说话声不丢
+                        self._decide(b)
                 return
 
-            speech = self._is_speech(rms)
+            self._decide(block)
 
-            if not self._active:
-                # 不在语音段里 → 这一帧就是背景候选，用它养噪声底
+    def _decide(self, block: np.ndarray) -> None:
+        """校准完成后的单块判定（回放也走这里）。"""
+        rms = float(np.sqrt(np.mean(np.square(block)) + 1e-12))
+        speech = self._is_speech(rms)
+
+        if not self._active:
+            # 不在语音段里 → 这一帧就是背景候选，用它养噪声底。
+            # 数字静音帧（预热期全零、麦克风门限）不含任何环境信息，喂进去只会
+            # 把噪声底拉回最低档，正是这次故障的回路，直接跳过。
+            if rms > _FLOOR_MIN:
                 self._bg.append(rms)
-                self._since_floor += 1
-                if self._since_floor >= _FLOOR_UPDATE:
-                    self._since_floor = 0
-                    self._refresh_floor()
+            self._since_floor += 1
+            if self._since_floor >= _FLOOR_UPDATE:
+                self._since_floor = 0
+                self._refresh_floor()
 
-                self._pre.append(block)
-                if len(self._pre) > self.preroll_n:
-                    self._pre.pop(0)
-                self._speech_run = self._speech_run + 1 if speech else 0
-                if self._speech_run >= 2:          # 连续 200ms 有声才敢认为是说话
-                    self._active = True
-                    self._buf = list(self._pre)
-                    self._pre.clear()
-                    self._silent_run = 0
-                    self._rms_hist.clear()
+            self._pre.append(block)
+            if len(self._pre) > self.preroll_n:
+                self._pre.pop(0)
+            self._speech_run = self._speech_run + 1 if speech else 0
+            if self._speech_run >= 2:          # 连续 200ms 有声才敢认为是说话
+                self._active = True
+                self._buf = list(self._pre)
+                self._pre.clear()
+                self._silent_run = 0
+                self._rms_hist.clear()
+            return
+
+        self._buf.append(block)
+        self._rms_hist.append(rms)
+        if len(self._rms_hist) > 40:
+            self._rms_hist.pop(0)
+        self._silent_run = 0 if speech else self._silent_run + 1
+
+        self._since_check += 1
+        if self._since_check >= 10:
+            self._since_check = 0
+            if self._is_stationary_noise():
+                # 稳态噪声：整段丢弃，并把这段的能量喂给背景窗，
+                # 让噪声底一步跟到真实环境（否则会一直"判为说话→丢弃"循环）
+                self.dropped_noise += 1
+                learned = list(self._rms_hist)      # _discard 会清空，先留一份
+                self._discard()
+                self._bg.extend(learned or [rms])
+                self._refresh_floor(force=True)
                 return
 
-            self._buf.append(block)
-            self._rms_hist.append(rms)
-            if len(self._rms_hist) > 40:
-                self._rms_hist.pop(0)
-            self._silent_run = 0 if speech else self._silent_run + 1
-
-            self._since_check += 1
-            if self._since_check >= 10:
-                self._since_check = 0
-                if self._is_stationary_noise():
-                    # 稳态噪声：整段丢弃，并把这段的能量喂给背景窗，
-                    # 让噪声底一步跟到真实环境（否则会一直"判为说话→丢弃"循环）
-                    self.dropped_noise += 1
-                    learned = list(self._rms_hist)      # _discard 会清空，先留一份
-                    self._discard()
-                    self._bg.extend(learned or [rms])
-                    self._refresh_floor(force=True)
-                    return
-
-            if self._silent_run >= self.silence_blocks or len(self._buf) >= self.max_blocks:
-                self._flush()
+        if self._silent_run >= self.silence_blocks or len(self._buf) >= self.max_blocks:
+            self._flush()
 
     def _discard(self) -> None:
         self._buf = []
@@ -401,6 +455,7 @@ class VADSegmenter:
         if not self._buf:
             self._discard()
             return
+        forced = len(self._buf) >= self.max_blocks
         audio = np.concatenate(self._buf)
         # 去掉尾部静音
         if self._silent_run > 0:
@@ -414,6 +469,12 @@ class VADSegmenter:
         self._pre = []
         self._rms_hist = []
 
+        if forced:
+            self._learn_from_forced(audio)
+        else:
+            # 正常收尾（靠停顿切出来的）本身就是"阈值分得清说话和背景"的证据
+            self.forced_flushes = 0
+
         if audio.size < int(BLOCK * self.min_blocks * 0.8):
             return
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
@@ -426,6 +487,42 @@ class VADSegmenter:
             self.on_segment(audio.astype(np.float32))
         except Exception as e:
             log_exc("audio.on_segment 回调异常", e)
+
+    def _learn_from_forced(self, audio: np.ndarray) -> None:
+        """被 max_len 强切的段：整段没有一帧低于阈值。
+
+        正常的句子总有换气停顿，是被"静音"自然收尾的。会走到强切只有一种情况 ——
+        噪声底被低估，阈值落在环境噪声底下，于是环境噪声全程算"在说话"。这种状态下
+        VAD 回不到空闲，而背景窗只在空闲时收样本，噪声底就永久卡死在原地：
+        越卡越听不到停顿，越听不到停顿越卡。现场"录了一整天、转写只有大段粘连文字"
+        就是这么来的。
+
+        破局不能靠在这段音频里猜分位数（段里全是噪声，猜出来的值还是噪声），
+        而是利用一个事实：能连续三段都强切，说明设备早就预热完了，此刻重新校准
+        一次就能量到真实现场。连续几段都这样才动手，避免把一段持续讲话误判成底噪。
+        """
+        n = audio.size // BLOCK
+        if n < 10:
+            return
+        frames = audio[: n * BLOCK].reshape(n, BLOCK)
+        rms = np.sqrt(np.mean(np.square(frames), axis=1))
+        quiet = float(_percentile(rms.tolist(), 0.1))
+        if quiet <= self.current_threshold:
+            self.forced_flushes = 0     # 段内有停顿，阈值没问题，计数清零
+            return
+        self.forced_flushes += 1
+        if self.forced_flushes < _FORCED_LEARN_AFTER:
+            return
+        self.forced_flushes = 0
+        old = self.noise_floor
+        self._calib.clear()             # 重新走一遍启动校准
+        self._calib_retry = 0
+        self._calib_peak = 0.0
+        self._pending.clear()
+        self._bg.clear()                # 卡死之前的背景样本全是旧的
+        log_exc("VAD 连续被上限强切，噪声底疑似被低估，重新校准",
+                f"floor {old:.4f}→重新测量 threshold {self.current_threshold:.4f}",
+                level=20)
 
     def flush_pending(self) -> None:
         """外部强制结束（停止监听 / 会议结束）时把残留缓冲吐出来。"""

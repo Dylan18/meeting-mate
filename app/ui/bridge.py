@@ -119,6 +119,21 @@ class Bridge:
         撞上 Window/Form 这类 .NET 对象会递归爆栈。
         """
         self._window = window
+        # 窗口起来了再开录：太早会拿不到设备状态，界面也来不及显示"正在监听"
+        threading.Thread(target=self._auto_listen, daemon=True,
+                         name="auto-listen").start()
+
+    def _auto_listen(self) -> None:
+        time.sleep(1.2)
+        if self._asst.listening or self._closing:
+            return
+        if not config.get("auto_listen", True):
+            return
+        try:
+            self._asst.start_listening()
+            log_exc("启动后自动开始监听", "", level=20)
+        except Exception as e:
+            log_exc("启动后自动监听失败", e)
 
     # ------------------------------------------------------------ 事件
     def _on_event(self, kind: str, payload) -> None:
@@ -202,6 +217,7 @@ class Bridge:
             "daily_report_enabled": config.get("daily_report_enabled", True),
             "daily_report_time": config.get("daily_report_time", "18:30"),
             "always_on_top": config.get("always_on_top", False),
+            "auto_listen": config.get("auto_listen", True),
             "llm": config.llm,
         }
 
@@ -209,7 +225,7 @@ class Bridge:
         allowed = {
             "mic_enabled", "system_audio", "mic_device_id", "asr_model",
             "asr_language", "daily_report_enabled", "daily_report_time",
-            "always_on_top", "llm",
+            "always_on_top", "auto_listen", "llm",
         }
         clean = {k: v for k, v in (patch or {}).items() if k in allowed}
 

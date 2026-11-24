@@ -42,6 +42,10 @@ DEFAULTS: dict[str, Any] = {
     "daily_report_time": "18:30",
     "auto_report_on_start": True,   # 启动时若昨天没日报，自动补一份
     "daily_report_enabled": True,
+    # 打开程序就开录。默认开：这个工具的使用方式是"早上打开记一天"，而程序崩溃、
+    # 睡眠唤醒、手动重启之后如果停在"未监听"，用户通常到晚上导出日报时才发现，
+    # 那一整天的音频已经没了。
+    "auto_listen": True,
     # 界面
     "always_on_top": False,
 }

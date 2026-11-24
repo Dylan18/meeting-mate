@@ -177,3 +177,48 @@ def test_long_run_never_goes_deaf():
 
     assert all(n >= 5 for n in per_phase), f"某个阶段完全没片段: {per_phase}"
     assert seg.current_threshold <= 0.0501
+
+
+def _wobbly_ambient(sec: float, seed: int = 3) -> list[np.ndarray]:
+    """起伏的现场噪声：每块电平在 0.006~0.02 之间随机（人走动、椅子、键盘、远处说话）。
+
+    纯白噪声的帧间变异系数只有 0.02，会被「稳态噪声」兜底直接吃掉，反而掩盖问题；
+    真实办公室噪声的变异系数在 0.3 上下，既过不了稳态判据，又永远高于被压低的阈值。
+    """
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(int(sec * 10)):
+        rms = rng.uniform(0.006, 0.02)
+        out.append(rng.normal(0, rms, size=BLOCK).astype(np.float32))
+    return out
+
+
+def test_calibration_ignores_digital_silence_window():
+    """启动瞬间采集流回全零，不能拿它当噪声底。
+
+    现场复现：每次点开始监听，前 2 秒麦克风是数字静音，噪声底被算成 0.0008，
+    阈值压到下限 0.006；随后环境噪声 0.01 全程高于阈值，VAD 再也分不出停顿。
+    """
+    seg = VADSegmenter(lambda a: None, calib_sec=2.0)
+    for b in [np.zeros(BLOCK, dtype=np.float32)] * 20:
+        seg.feed(b)
+    assert seg.noise_floor <= 0.002      # 第一窗不可信，还没定下来
+    for b in _blocks(_noise(3.0, 0.012)):
+        seg.feed(b)
+    print(f"  数字静音后校准: 底噪 {seg.noise_floor:.4f} 阈值 {seg.current_threshold:.4f}")
+    assert seg.noise_floor > 0.006, "把数字静音当成噪声底了"
+
+
+def test_forced_flush_triggers_recalibration():
+    """连续被 20 秒上限强切 → 必须重新校准，不能一直吐 20 秒的粘连片段。
+
+    修复前：噪声底卡在 0.0008，每 20 秒强切一段，一整天都是大段粘连文字。
+    """
+    out: list[np.ndarray] = []
+    seg = VADSegmenter(lambda a: out.append(a), calib_sec=1.0)
+    for b in _wobbly_ambient(80):
+        seg.feed(b)
+    print(f"  强切后: 底噪 {seg.noise_floor:.4f} 阈值 {seg.current_threshold:.4f} "
+          f"片段 {len(out)} 长段 {sum(1 for a in out if a.size >= BLOCK * 195)}")
+    assert seg.noise_floor > 0.005, "噪声底卡死在最低档，没有自我修正"
+    assert seg.current_threshold > 0.006, "阈值仍在下限，永远分不出停顿"
